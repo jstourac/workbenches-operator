@@ -68,6 +68,14 @@ unit-test: manifests generate envtest ## Run unit tests (no fmt/vet check).
 test-e2e: ## Run end-to-end tests against the cluster specified in ~/.kube/config.
 	go test ./tests/e2e/ -v -timeout 30m
 
+.PHONY: test-upgrade
+test-upgrade: ## Run upgrade and migration tests against the cluster specified in ~/.kube/config.
+	go test ./tests/upgrade/ -v -timeout 30m
+
+.PHONY: test-handler
+test-handler: ## Run ModuleHandler reference implementation tests.
+	go test ./contrib/odh-operator/... -v -count=1
+
 .PHONY: test-coverage
 test-coverage: test ## Generate HTML coverage report.
 	go tool cover -html=cover.out -o coverage.html
