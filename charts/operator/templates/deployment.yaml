@@ -31,10 +31,17 @@ spec:
         - /manager
         args:
         - --health-probe-bind-address=:8081
+        - --manifests-base-path={{ .Values.manifests.basePath }}
         {{- if .Values.leaderElection.enabled }}
         - --leader-elect
         {{- end }}
+        {{- if not .Values.webhooks.enabled }}
+        - --enable-webhooks=false
+        {{- end }}
         ports:
+        - containerPort: 9443
+          name: webhook-server
+          protocol: TCP
         - containerPort: 8443
           name: https
           protocol: TCP

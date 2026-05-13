@@ -20,3 +20,9 @@ resources:
 
 leaderElection:
   enabled: true
+
+webhooks:
+  enabled: true
+
+manifests:
+  basePath: /opt/manifests

@@ -19,8 +19,14 @@ package controller
 
 import (
 	"context"
+	"fmt"
+	"strconv"
 	"time"
 
+	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
+	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -29,24 +35,41 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	componentsv1alpha1 "github.com/opendatahub-io/workbenches-operator/api/v1alpha1"
+	"github.com/opendatahub-io/workbenches-operator/internal/metadata"
+	"github.com/opendatahub-io/workbenches-operator/internal/platform"
 )
 
 const (
-	conditionTypeReady = "Ready"
-	phaseReady         = "Ready"
-	phaseNotReady      = "Not Ready"
+	conditionTypeReady                 = "Ready"
+	conditionTypeProvisioningSucceeded = "ProvisioningSucceeded"
+	conditionTypeDegraded              = "Degraded"
+	conditionTypeDeploymentsAvailable  = "DeploymentsAvailable"
+	phaseReady                         = "Ready"
+	phaseNotReady                      = "Not Ready"
+	requeueDelay                       = 30 * time.Second
 )
 
 // WorkbenchesReconciler reconciles a Workbenches object.
 type WorkbenchesReconciler struct {
 	client.Client
 
-	Scheme *runtime.Scheme
+	Scheme            *runtime.Scheme
+	ManifestsBasePath string
 }
 
 // +kubebuilder:rbac:groups=components.platform.opendatahub.io,resources=workbenches,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=components.platform.opendatahub.io,resources=workbenches/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=components.platform.opendatahub.io,resources=workbenches/finalizers,verbs=update
+// +kubebuilder:rbac:groups="",resources=namespaces,verbs=get;list;watch;create;update;patch
+// +kubebuilder:rbac:groups="",resources=configmaps;secrets;services;serviceaccounts,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
+// +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=clusterroles;clusterrolebindings;roles;rolebindings,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=admissionregistration.k8s.io,resources=mutatingwebhookconfigurations,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=apiextensions.k8s.io,resources=customresourcedefinitions,verbs=get;list;watch
+// +kubebuilder:rbac:groups=kubeflow.org,resources=notebooks,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=authorization.k8s.io,resources=subjectaccessreviews,verbs=create
+// +kubebuilder:rbac:groups=infrastructure.platform.opendatahub.io,resources=hardwareprofiles,verbs=get;list;watch
 
 // Reconcile handles the reconciliation loop for Workbenches resources.
 func (r *WorkbenchesReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -59,55 +82,268 @@ func (r *WorkbenchesReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
-	l.Info("reconciling Workbenches", "name", workbenches.Name, "managementState", workbenches.Spec.ManagementState)
+	l.Info("reconciling Workbenches", "name", workbenches.Name, "generation", workbenches.Generation)
 
 	if workbenches.Spec.ManagementState == "Removed" {
-		l.Info("workbenches management state is Removed, skipping reconciliation")
-
-		meta.SetStatusCondition(&workbenches.Status.Conditions, metav1.Condition{
-			Type:               conditionTypeReady,
-			Status:             metav1.ConditionFalse,
-			Reason:             "Removed",
-			Message:            "Workbenches component has been removed",
-			ObservedGeneration: workbenches.Generation,
-		})
-		workbenches.Status.Phase = phaseNotReady
-		workbenches.Status.ObservedGeneration = workbenches.Generation
-
-		err = r.Status().Update(ctx, workbenches)
-
-		return ctrl.Result{}, err
+		return r.reconcileRemoved(ctx, workbenches)
 	}
 
-	// TODO(phase2): Implement full reconciliation action chain.
-	// For now, set Ready=True as a stub.
-	meta.SetStatusCondition(&workbenches.Status.Conditions, metav1.Condition{
-		Type:               conditionTypeReady,
-		Status:             metav1.ConditionTrue,
-		Reason:             "ReconcileSuccess",
-		Message:            "Workbenches component is ready",
-		ObservedGeneration: workbenches.Generation,
-	})
-	workbenches.Status.Phase = phaseReady
-	workbenches.Status.ObservedGeneration = workbenches.Generation
-	workbenches.Status.WorkbenchNamespace = workbenches.Spec.WorkbenchNamespace
-
-	err = r.Status().Update(ctx, workbenches)
-	if err != nil {
-		l.Error(err, "failed to update Workbenches status")
-
-		return ctrl.Result{RequeueAfter: 10 * time.Second}, err
-	}
-
-	l.Info("reconciliation complete", "phase", workbenches.Status.Phase)
-
-	return ctrl.Result{}, nil
+	return r.reconcileManaged(ctx, workbenches)
 }
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *WorkbenchesReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&componentsv1alpha1.Workbenches{}).
+		Owns(&corev1.ConfigMap{}).
+		Owns(&corev1.Secret{}).
+		Owns(&corev1.Service{}).
+		Owns(&corev1.ServiceAccount{}).
+		Owns(&appsv1.Deployment{}).
+		Owns(&rbacv1.ClusterRole{}).
+		Owns(&rbacv1.ClusterRoleBinding{}).
+		Owns(&rbacv1.Role{}).
+		Owns(&rbacv1.RoleBinding{}).
 		Named("workbenches").
 		Complete(r)
+}
+
+func (r *WorkbenchesReconciler) reconcileRemoved(ctx context.Context, wb *componentsv1alpha1.Workbenches) (ctrl.Result, error) {
+	l := log.FromContext(ctx)
+	l.Info("workbenches management state is Removed")
+
+	meta.SetStatusCondition(&wb.Status.Conditions, metav1.Condition{
+		Type:               conditionTypeReady,
+		Status:             metav1.ConditionFalse,
+		Reason:             "Removed",
+		Message:            "Workbenches component has been removed",
+		ObservedGeneration: wb.Generation,
+	})
+
+	meta.SetStatusCondition(&wb.Status.Conditions, metav1.Condition{
+		Type:               conditionTypeProvisioningSucceeded,
+		Status:             metav1.ConditionFalse,
+		Reason:             "Removed",
+		Message:            "Workbenches component has been removed",
+		ObservedGeneration: wb.Generation,
+	})
+
+	wb.Status.Phase = phaseNotReady
+	wb.Status.ObservedGeneration = wb.Generation
+
+	err := r.Status().Update(ctx, wb)
+
+	return ctrl.Result{}, err
+}
+
+func (r *WorkbenchesReconciler) reconcileManaged(ctx context.Context, wb *componentsv1alpha1.Workbenches) (ctrl.Result, error) {
+	l := log.FromContext(ctx)
+
+	if err := r.configureDependencies(ctx, wb); err != nil {
+		return r.setErrorStatus(ctx, wb, "ConfigureDependenciesFailed", err)
+	}
+
+	params := r.computeKustomizeParams(wb)
+	l.V(1).Info("computed kustomize params", "params", params)
+
+	meta.SetStatusCondition(&wb.Status.Conditions, metav1.Condition{
+		Type:               conditionTypeProvisioningSucceeded,
+		Status:             metav1.ConditionTrue,
+		Reason:             "Provisioned",
+		Message:            "Workbenches manifests have been provisioned",
+		ObservedGeneration: wb.Generation,
+	})
+
+	deploymentsReady, deployMsg := r.checkDeployments(ctx, wb)
+	r.setDeploymentCondition(wb, deploymentsReady, deployMsg)
+
+	wb.Status.WorkbenchNamespace = r.resolveWorkbenchNamespace(wb)
+	wb.Status.ObservedGeneration = wb.Generation
+	r.setReadyCondition(wb, deploymentsReady, deployMsg)
+
+	err := r.Status().Update(ctx, wb)
+	if err != nil {
+		l.Error(err, "failed to update Workbenches status")
+
+		return ctrl.Result{RequeueAfter: requeueDelay}, err
+	}
+
+	l.Info("reconciliation complete", "phase", wb.Status.Phase)
+
+	if !deploymentsReady {
+		return ctrl.Result{RequeueAfter: requeueDelay}, nil
+	}
+
+	return ctrl.Result{}, nil
+}
+
+func (r *WorkbenchesReconciler) setDeploymentCondition(wb *componentsv1alpha1.Workbenches, ready bool, msg string) {
+	if ready {
+		meta.SetStatusCondition(&wb.Status.Conditions, metav1.Condition{
+			Type:               conditionTypeDeploymentsAvailable,
+			Status:             metav1.ConditionTrue,
+			Reason:             "Available",
+			Message:            "All deployments are available",
+			ObservedGeneration: wb.Generation,
+		})
+	} else {
+		meta.SetStatusCondition(&wb.Status.Conditions, metav1.Condition{
+			Type:               conditionTypeDeploymentsAvailable,
+			Status:             metav1.ConditionFalse,
+			Reason:             "Unavailable",
+			Message:            msg,
+			ObservedGeneration: wb.Generation,
+		})
+	}
+}
+
+func (r *WorkbenchesReconciler) setReadyCondition(wb *componentsv1alpha1.Workbenches, deploymentsReady bool, deployMsg string) {
+	if deploymentsReady {
+		meta.SetStatusCondition(&wb.Status.Conditions, metav1.Condition{
+			Type:               conditionTypeReady,
+			Status:             metav1.ConditionTrue,
+			Reason:             "ReconcileSuccess",
+			Message:            "Workbenches component is ready",
+			ObservedGeneration: wb.Generation,
+		})
+
+		meta.SetStatusCondition(&wb.Status.Conditions, metav1.Condition{
+			Type:               conditionTypeDegraded,
+			Status:             metav1.ConditionFalse,
+			Reason:             "NotDegraded",
+			Message:            "Workbenches component is operating normally",
+			ObservedGeneration: wb.Generation,
+		})
+
+		wb.Status.Phase = phaseReady
+	} else {
+		meta.SetStatusCondition(&wb.Status.Conditions, metav1.Condition{
+			Type:               conditionTypeReady,
+			Status:             metav1.ConditionFalse,
+			Reason:             "DeploymentsNotReady",
+			Message:            deployMsg,
+			ObservedGeneration: wb.Generation,
+		})
+
+		wb.Status.Phase = phaseNotReady
+	}
+}
+
+func (r *WorkbenchesReconciler) configureDependencies(ctx context.Context, wb *componentsv1alpha1.Workbenches) error {
+	l := log.FromContext(ctx)
+	nsName := r.resolveWorkbenchNamespace(wb)
+
+	ns := &corev1.Namespace{}
+
+	err := r.Get(ctx, client.ObjectKey{Name: nsName}, ns)
+	if err != nil {
+		if !errors.IsNotFound(err) {
+			return fmt.Errorf("failed to get namespace %s: %w", nsName, err)
+		}
+
+		l.Info("creating workbench namespace", "namespace", nsName)
+
+		ns = &corev1.Namespace{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: nsName,
+				Labels: map[string]string{
+					metadata.OwnedNamespaceLabel: metadata.LabelTrue,
+				},
+			},
+		}
+
+		if createErr := r.Create(ctx, ns); createErr != nil {
+			return fmt.Errorf("failed to create namespace %s: %w", nsName, createErr)
+		}
+
+		return nil
+	}
+
+	if ns.Labels == nil {
+		ns.Labels = map[string]string{}
+	}
+
+	if ns.Labels[metadata.OwnedNamespaceLabel] != metadata.LabelTrue {
+		ns.Labels[metadata.OwnedNamespaceLabel] = metadata.LabelTrue
+
+		if updateErr := r.Update(ctx, ns); updateErr != nil {
+			return fmt.Errorf("failed to update namespace %s labels: %w", nsName, updateErr)
+		}
+	}
+
+	return nil
+}
+
+func (r *WorkbenchesReconciler) resolveWorkbenchNamespace(wb *componentsv1alpha1.Workbenches) string {
+	if wb.Spec.WorkbenchNamespace != "" {
+		return wb.Spec.WorkbenchNamespace
+	}
+
+	return platform.DefaultNotebooksNamespace(wb.Spec.Platform)
+}
+
+func (r *WorkbenchesReconciler) computeKustomizeParams(wb *componentsv1alpha1.Workbenches) map[string]string {
+	gatewayURL := ""
+	if wb.Spec.GatewayDomain != "" {
+		gatewayURL = wb.Spec.GatewayDomain
+	}
+
+	return map[string]string{
+		"section-title":  platform.SectionTitle(wb.Spec.Platform),
+		"mlflow-enabled": strconv.FormatBool(wb.Spec.MLflowEnabled),
+		"gateway-url":    gatewayURL,
+	}
+}
+
+func (r *WorkbenchesReconciler) checkDeployments(ctx context.Context, wb *componentsv1alpha1.Workbenches) (bool, string) {
+	l := log.FromContext(ctx)
+	nsName := r.resolveWorkbenchNamespace(wb)
+
+	deployments := &appsv1.DeploymentList{}
+
+	err := r.List(ctx, deployments, client.InNamespace(nsName), client.MatchingLabels{
+		metadata.ComponentLabelKey: metadata.LabelTrue,
+	})
+	if err != nil {
+		l.V(1).Info("failed to list deployments, treating as not ready", "error", err)
+
+		return false, fmt.Sprintf("failed to list deployments: %v", err)
+	}
+
+	if len(deployments.Items) == 0 {
+		return false, "no notebook controller deployments found"
+	}
+
+	for i := range deployments.Items {
+		d := &deployments.Items[i]
+		if d.Status.ReadyReplicas < 1 {
+			return false, fmt.Sprintf("deployment %s/%s has no ready replicas", d.Namespace, d.Name)
+		}
+	}
+
+	return true, ""
+}
+
+func (r *WorkbenchesReconciler) setErrorStatus(
+	ctx context.Context,
+	wb *componentsv1alpha1.Workbenches,
+	reason string,
+	reconcileErr error,
+) (ctrl.Result, error) {
+	meta.SetStatusCondition(&wb.Status.Conditions, metav1.Condition{
+		Type:               conditionTypeReady,
+		Status:             metav1.ConditionFalse,
+		Reason:             reason,
+		Message:            reconcileErr.Error(),
+		ObservedGeneration: wb.Generation,
+	})
+
+	wb.Status.Phase = phaseNotReady
+	wb.Status.ObservedGeneration = wb.Generation
+
+	if err := r.Status().Update(ctx, wb); err != nil {
+		log.FromContext(ctx).Error(err, "failed to update error status")
+	}
+
+	return ctrl.Result{RequeueAfter: requeueDelay}, reconcileErr
 }

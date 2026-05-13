@@ -5,6 +5,11 @@ run:
 
 linters:
   default: all
+  exclusions:
+    rules:
+      - linters:
+          - lll
+        source: "kubebuilder:webhook:|webhook:path="
   disable:
     - cyclop
     - depguard
