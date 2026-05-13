@@ -35,11 +35,19 @@ func TestDetermineHWPFromAnnotations(t *testing.T) {
 			wantSource:  "",
 		},
 		{
-			name: "accelerator profile",
+			name: "accelerator profile simple",
 			annotations: map[string]string{
 				acceleratorNameAnnotation: "NVIDIA A100",
 			},
 			wantName:   "nvidia-a100-notebooks",
+			wantSource: "AcceleratorProfile",
+		},
+		{
+			name: "accelerator with spaces and caps",
+			annotations: map[string]string{
+				acceleratorNameAnnotation: "Small GPU",
+			},
+			wantName:   "small-gpu-notebooks",
 			wantSource: "AcceleratorProfile",
 		},
 		{
@@ -61,6 +69,14 @@ func TestDetermineHWPFromAnnotations(t *testing.T) {
 			wantSource: "ContainerSize",
 		},
 		{
+			name: "container size with spaces",
+			annotations: map[string]string{
+				lastSizeSelectionAnnotation: "Extra Large",
+			},
+			wantName:   "container-size-extra-large-notebooks",
+			wantSource: "ContainerSize",
+		},
+		{
 			name: "accelerator takes priority over container size",
 			annotations: map[string]string{
 				acceleratorNameAnnotation:   "T4",
@@ -68,6 +84,32 @@ func TestDetermineHWPFromAnnotations(t *testing.T) {
 			},
 			wantName:   "t4-notebooks",
 			wantSource: "AcceleratorProfile",
+		},
+		{
+			name: "empty accelerator falls through to container size",
+			annotations: map[string]string{
+				acceleratorNameAnnotation:   "",
+				lastSizeSelectionAnnotation: "Small",
+			},
+			wantName:   "container-size-small-notebooks",
+			wantSource: "ContainerSize",
+		},
+		{
+			name: "empty both returns nothing",
+			annotations: map[string]string{
+				acceleratorNameAnnotation:   "",
+				lastSizeSelectionAnnotation: "",
+			},
+			wantName:   "",
+			wantSource: "",
+		},
+		{
+			name: "unrelated annotations are ignored",
+			annotations: map[string]string{
+				"some-other-annotation": "value",
+			},
+			wantName:   "",
+			wantSource: "",
 		},
 	}
 
@@ -86,5 +128,19 @@ func TestDetermineHWPFromAnnotations(t *testing.T) {
 				t.Errorf("source = %q, want %q", source, tt.wantSource)
 			}
 		})
+	}
+}
+
+func TestShouldSkipForKueueConstants(t *testing.T) {
+	if acceleratorNameAnnotation != "opendatahub.io/accelerator-name" {
+		t.Errorf("unexpected acceleratorNameAnnotation: %s", acceleratorNameAnnotation)
+	}
+
+	if lastSizeSelectionAnnotation != "notebooks.opendatahub.io/last-size-selection" {
+		t.Errorf("unexpected lastSizeSelectionAnnotation: %s", lastSizeSelectionAnnotation)
+	}
+
+	if containerSizeHWPPrefix != "container-size-" {
+		t.Errorf("unexpected containerSizeHWPPrefix: %s", containerSizeHWPPrefix)
 	}
 }

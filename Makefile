@@ -68,6 +68,11 @@ unit-test: manifests generate envtest ## Run unit tests (no fmt/vet check).
 test-e2e: ## Run end-to-end tests against the cluster specified in ~/.kube/config.
 	go test ./tests/e2e/ -v -timeout 30m
 
+.PHONY: test-coverage
+test-coverage: test ## Generate HTML coverage report.
+	go tool cover -html=cover.out -o coverage.html
+	@echo "Coverage report written to coverage.html"
+
 ##@ Build
 
 .PHONY: build
@@ -93,6 +98,25 @@ docker-buildx: ## Build and push docker image for cross-platform support.
 	docker buildx use workbenches-builder
 	docker buildx build --push --platform=$(PLATFORMS) --tag $(IMG) .
 	- docker buildx rm workbenches-builder
+
+##@ Bundle
+
+BUNDLE_IMG ?= $(IMG)-bundle:v$(VERSION)
+VERSION ?= 0.1.0
+
+.PHONY: bundle
+bundle: manifests kustomize ## Generate OLM bundle manifests.
+	cd config/manager && $(KUSTOMIZE) edit set image controller=$(IMG)
+	$(KUSTOMIZE) build config/default > bundle/manifests/workbenches-operator-resources.yaml
+	@echo "Bundle generated in bundle/"
+
+.PHONY: bundle-build
+bundle-build: ## Build the bundle image.
+	docker build -f bundle.Dockerfile -t $(BUNDLE_IMG) .
+
+.PHONY: bundle-push
+bundle-push: ## Push the bundle image.
+	docker push $(BUNDLE_IMG)
 
 ##@ Deployment
 

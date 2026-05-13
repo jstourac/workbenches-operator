@@ -25,19 +25,28 @@ func TestParseConnectionRefs(t *testing.T) {
 		name  string
 		input string
 		want  int
+		first string
 	}{
 		{name: "empty", input: "", want: 0},
-		{name: "single", input: "my-secret", want: 1},
-		{name: "multiple", input: "secret1,secret2,secret3", want: 3},
-		{name: "with spaces", input: " secret1 , secret2 ", want: 2},
-		{name: "trailing comma", input: "secret1,", want: 1},
+		{name: "single ref", input: "my-secret", want: 1, first: "my-secret"},
+		{name: "multiple refs", input: "s1,s2,s3", want: 3, first: "s1"},
+		{name: "with spaces", input: " s1 , s2 ", want: 2, first: "s1"},
+		{name: "trailing comma", input: "s1,", want: 1, first: "s1"},
+		{name: "leading comma", input: ",s1", want: 1, first: "s1"},
+		{name: "only commas", input: ",,,", want: 0},
+		{name: "whitespace only", input: "   ", want: 0},
+		{name: "namespaced ref", input: "ns1/secret1", want: 1, first: "ns1/secret1"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			refs := parseConnectionRefs(tt.input)
 			if len(refs) != tt.want {
-				t.Errorf("parseConnectionRefs(%q) returned %d refs, want %d", tt.input, len(refs), tt.want)
+				t.Errorf("parseConnectionRefs(%q) len = %d, want %d", tt.input, len(refs), tt.want)
+			}
+
+			if tt.want > 0 && refs[0] != tt.first {
+				t.Errorf("parseConnectionRefs(%q)[0] = %q, want %q", tt.input, refs[0], tt.first)
 			}
 		})
 	}
@@ -51,8 +60,10 @@ func TestParseSecretRef(t *testing.T) {
 		wantName  string
 		wantNS    string
 	}{
-		{name: "simple", ref: "my-secret", defaultNS: "ns1", wantName: "my-secret", wantNS: "ns1"},
-		{name: "namespaced", ref: "other-ns/my-secret", defaultNS: "ns1", wantName: "my-secret", wantNS: "other-ns"},
+		{name: "simple ref", ref: "my-secret", defaultNS: "ns1", wantName: "my-secret", wantNS: "ns1"},
+		{name: "namespaced ref", ref: "other-ns/my-secret", defaultNS: "ns1", wantName: "my-secret", wantNS: "other-ns"},
+		{name: "multiple slashes", ref: "ns/path/secret", defaultNS: "ns1", wantName: "path/secret", wantNS: "ns"},
+		{name: "empty ref", ref: "", defaultNS: "ns1", wantName: "", wantNS: "ns1"},
 	}
 
 	for _, tt := range tests {
@@ -72,37 +83,86 @@ func TestParseSecretRef(t *testing.T) {
 func TestHasEnvFromSecret(t *testing.T) {
 	envFrom := []interface{}{
 		map[string]interface{}{
-			"secretRef": map[string]interface{}{
-				"name": "existing-secret",
-			},
+			"secretRef": map[string]interface{}{"name": "existing-secret"},
+		},
+		map[string]interface{}{
+			"configMapRef": map[string]interface{}{"name": "some-config"},
 		},
 	}
 
-	if !hasEnvFromSecret(envFrom, "existing-secret") {
-		t.Error("expected hasEnvFromSecret to return true for existing-secret")
+	tests := []struct {
+		name       string
+		envFrom    []interface{}
+		secretName string
+		want       bool
+	}{
+		{name: "found", envFrom: envFrom, secretName: "existing-secret", want: true},
+		{name: "not found", envFrom: envFrom, secretName: "nonexistent", want: false},
+		{name: "nil slice", envFrom: nil, secretName: "anything", want: false},
+		{name: "empty slice", envFrom: []interface{}{}, secretName: "anything", want: false},
 	}
 
-	if hasEnvFromSecret(envFrom, "nonexistent") {
-		t.Error("expected hasEnvFromSecret to return false for nonexistent")
-	}
-
-	if hasEnvFromSecret(nil, "anything") {
-		t.Error("expected hasEnvFromSecret to return false for nil slice")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := hasEnvFromSecret(tt.envFrom, tt.secretName)
+			if got != tt.want {
+				t.Errorf("hasEnvFromSecret(%q) = %v, want %v", tt.secretName, got, tt.want)
+			}
+		})
 	}
 }
 
 func TestIsInOldRefs(t *testing.T) {
 	oldRefs := []string{"secret1", "other-ns/secret2"}
 
-	if !isInOldRefs("secret1", oldRefs, "default") {
-		t.Error("expected isInOldRefs to return true for secret1")
+	tests := []struct {
+		name     string
+		secretNm string
+		want     bool
+	}{
+		{name: "direct match", secretNm: "secret1", want: true},
+		{name: "namespaced match", secretNm: "secret2", want: true},
+		{name: "no match", secretNm: "secret3", want: false},
+		{name: "empty name", secretNm: "", want: false},
 	}
 
-	if !isInOldRefs("secret2", oldRefs, "default") {
-		t.Error("expected isInOldRefs to return true for secret2 (namespaced ref)")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := isInOldRefs(tt.secretNm, oldRefs, "default")
+			if got != tt.want {
+				t.Errorf("isInOldRefs(%q) = %v, want %v", tt.secretNm, got, tt.want)
+			}
+		})
 	}
+}
 
-	if isInOldRefs("secret3", oldRefs, "default") {
-		t.Error("expected isInOldRefs to return false for secret3")
-	}
+func TestFilterStaleEnvFrom(t *testing.T) {
+	t.Run("removes stale entries", func(t *testing.T) {
+		envFrom := []interface{}{
+			map[string]interface{}{"secretRef": map[string]interface{}{"name": "old-secret"}},
+			map[string]interface{}{"secretRef": map[string]interface{}{"name": "keep-secret"}},
+			map[string]interface{}{"configMapRef": map[string]interface{}{"name": "config"}},
+		}
+		oldRefs := []string{"old-secret", "keep-secret"}
+		newSet := map[string]bool{"keep-secret": true}
+
+		result := filterStaleEnvFrom(envFrom, oldRefs, newSet, "default")
+
+		if len(result) != 2 {
+			t.Errorf("expected 2 entries, got %d", len(result))
+		}
+	})
+
+	t.Run("preserves non-connection entries", func(t *testing.T) {
+		envFrom := []interface{}{
+			map[string]interface{}{"configMapRef": map[string]interface{}{"name": "config"}},
+			"invalid-entry",
+		}
+
+		result := filterStaleEnvFrom(envFrom, nil, nil, "default")
+
+		if len(result) != 2 {
+			t.Errorf("expected 2 entries preserved, got %d", len(result))
+		}
+	})
 }

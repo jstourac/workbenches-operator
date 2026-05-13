@@ -23,149 +23,280 @@ import (
 )
 
 func TestFindMainContainer(t *testing.T) {
-	containers := []interface{}{
-		map[string]interface{}{"name": "sidecar"},
-		map[string]interface{}{"name": "my-notebook"},
-		map[string]interface{}{"name": "oauth-proxy"},
+	tests := []struct {
+		name       string
+		containers []interface{}
+		notebook   string
+		wantIdx    int
+	}{
+		{
+			name: "finds matching container",
+			containers: []interface{}{
+				map[string]interface{}{"name": "sidecar"},
+				map[string]interface{}{"name": "my-notebook"},
+				map[string]interface{}{"name": "oauth-proxy"},
+			},
+			notebook: "my-notebook",
+			wantIdx:  1,
+		},
+		{
+			name: "returns -1 for no match",
+			containers: []interface{}{
+				map[string]interface{}{"name": "sidecar"},
+			},
+			notebook: "nonexistent",
+			wantIdx:  -1,
+		},
+		{
+			name:       "returns -1 for empty slice",
+			containers: []interface{}{},
+			notebook:   "notebook",
+			wantIdx:    -1,
+		},
+		{
+			name: "handles invalid container type",
+			containers: []interface{}{
+				"not-a-map",
+				map[string]interface{}{"name": "target"},
+			},
+			notebook: "target",
+			wantIdx:  1,
+		},
 	}
 
-	idx := findMainContainer(containers, "my-notebook")
-	if idx != 1 {
-		t.Errorf("expected index 1, got %d", idx)
-	}
-
-	idx = findMainContainer(containers, "nonexistent")
-	if idx != -1 {
-		t.Errorf("expected index -1, got %d", idx)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			idx := findMainContainer(tt.containers, tt.notebook)
+			if idx != tt.wantIdx {
+				t.Errorf("findMainContainer() = %d, want %d", idx, tt.wantIdx)
+			}
+		})
 	}
 }
 
 func TestBuildResourceLists(t *testing.T) {
-	identifiers := []interface{}{
-		map[string]interface{}{
-			"identifier":   "cpu",
-			"minCount":     "1",
-			"maxCount":     "4",
-			"defaultCount": "2",
-		},
-		map[string]interface{}{
-			"identifier":   "memory",
-			"minCount":     "1Gi",
-			"maxCount":     "8Gi",
-			"defaultCount": "2Gi",
-		},
-		map[string]interface{}{
-			"identifier":   "nvidia.com/gpu",
-			"defaultCount": "1",
-		},
-	}
+	t.Run("minCount and maxCount take priority over defaultCount", func(t *testing.T) {
+		identifiers := []interface{}{
+			map[string]interface{}{
+				"identifier":   "cpu",
+				"minCount":     "1",
+				"maxCount":     "4",
+				"defaultCount": "2",
+			},
+		}
 
-	requests, limits := buildResourceLists(identifiers)
+		requests, limits := buildResourceLists(identifiers)
 
-	if len(requests) != 3 {
-		t.Errorf("expected 3 requests, got %d", len(requests))
-	}
+		if v := requests["cpu"]; v.String() != "1" {
+			t.Errorf("expected cpu request 1, got %s", v.String())
+		}
 
-	if len(limits) != 3 {
-		t.Errorf("expected 3 limits, got %d", len(limits))
-	}
+		if v := limits["cpu"]; v.String() != "4" {
+			t.Errorf("expected cpu limit 4, got %s", v.String())
+		}
+	})
 
-	if v, ok := requests["cpu"]; !ok || v.String() != "1" {
-		t.Errorf("expected cpu request of 1, got %v", v)
-	}
+	t.Run("defaultCount used when min/max absent", func(t *testing.T) {
+		identifiers := []interface{}{
+			map[string]interface{}{
+				"identifier":   "nvidia.com/gpu",
+				"defaultCount": "1",
+			},
+		}
 
-	if v, ok := limits["cpu"]; !ok || v.String() != "4" {
-		t.Errorf("expected cpu limit of 4, got %v", v)
-	}
+		requests, limits := buildResourceLists(identifiers)
 
-	if v, ok := requests["nvidia.com/gpu"]; !ok || v.String() != "1" {
-		t.Errorf("expected nvidia.com/gpu request of 1, got %v", v)
-	}
+		if v := requests["nvidia.com/gpu"]; v.String() != "1" {
+			t.Errorf("expected gpu request 1, got %s", v.String())
+		}
+
+		if v := limits["nvidia.com/gpu"]; v.String() != "1" {
+			t.Errorf("expected gpu limit 1, got %s", v.String())
+		}
+	})
+
+	t.Run("skips entries without identifier", func(t *testing.T) {
+		identifiers := []interface{}{
+			map[string]interface{}{"displayName": "CPU", "defaultCount": "1"},
+		}
+
+		requests, limits := buildResourceLists(identifiers)
+
+		if len(requests) != 0 {
+			t.Errorf("expected 0 requests, got %d", len(requests))
+		}
+
+		if len(limits) != 0 {
+			t.Errorf("expected 0 limits, got %d", len(limits))
+		}
+	})
+
+	t.Run("handles memory resources", func(t *testing.T) {
+		identifiers := []interface{}{
+			map[string]interface{}{
+				"identifier": "memory",
+				"minCount":   "1Gi",
+				"maxCount":   "8Gi",
+			},
+		}
+
+		requests, limits := buildResourceLists(identifiers)
+
+		if v := requests["memory"]; v.String() != "1Gi" {
+			t.Errorf("expected memory request 1Gi, got %s", v.String())
+		}
+
+		if v := limits["memory"]; v.String() != "8Gi" {
+			t.Errorf("expected memory limit 8Gi, got %s", v.String())
+		}
+	})
 }
 
 func TestBuildResourcesMap(t *testing.T) {
-	identifiers := []interface{}{
-		map[string]interface{}{
-			"identifier": "cpu",
-			"minCount":   "100m",
-			"maxCount":   "2",
-		},
-	}
+	t.Run("builds map with both requests and limits", func(t *testing.T) {
+		identifiers := []interface{}{
+			map[string]interface{}{
+				"identifier": "cpu",
+				"minCount":   "100m",
+				"maxCount":   "2",
+			},
+		}
 
-	requests, limits := buildResourceLists(identifiers)
-	resources := buildResourcesMap(requests, limits)
+		requests, limits := buildResourceLists(identifiers)
+		resources := buildResourcesMap(requests, limits)
 
-	if _, ok := resources["requests"]; !ok {
-		t.Error("expected requests key in resources map")
-	}
+		if _, ok := resources["requests"]; !ok {
+			t.Error("expected requests key")
+		}
 
-	if _, ok := resources["limits"]; !ok {
-		t.Error("expected limits key in resources map")
-	}
+		if _, ok := resources["limits"]; !ok {
+			t.Error("expected limits key")
+		}
+	})
+
+	t.Run("omits empty requests or limits", func(t *testing.T) {
+		identifiers := []interface{}{}
+
+		requests, limits := buildResourceLists(identifiers)
+		resources := buildResourcesMap(requests, limits)
+
+		if _, ok := resources["requests"]; ok {
+			t.Error("expected no requests key for empty identifiers")
+		}
+	})
 }
 
 func TestApplyHardwareProfileToNotebook(t *testing.T) {
-	hwp := &unstructured.Unstructured{
-		Object: map[string]interface{}{
-			"spec": map[string]interface{}{
-				"scheduling": map[string]interface{}{
-					"node": map[string]interface{}{
-						"nodeSelector": map[string]interface{}{
-							"nvidia.com/gpu.present": "true",
-						},
-						"tolerations": []interface{}{
-							map[string]interface{}{
-								"key":      "nvidia.com/gpu",
-								"operator": "Exists",
-								"effect":   "NoSchedule",
+	t.Run("applies nodeSelector tolerations and resources", func(t *testing.T) {
+		hwp := makeHWP(map[string]interface{}{
+			"nvidia.com/gpu.present": "true",
+		}, []interface{}{
+			map[string]interface{}{
+				"key":      "nvidia.com/gpu",
+				"operator": "Exists",
+				"effect":   "NoSchedule",
+			},
+		}, []interface{}{
+			map[string]interface{}{
+				"identifier": "cpu",
+				"minCount":   "1",
+				"maxCount":   "4",
+			},
+		})
+
+		notebook := makeNotebook("my-notebook", "test-ns")
+
+		err := applyHardwareProfileToNotebook(hwp, notebook)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		nodeSelector, _, _ := unstructured.NestedStringMap(notebook.Object, "spec", "template", "spec", "nodeSelector")
+		if nodeSelector["nvidia.com/gpu.present"] != "true" {
+			t.Error("expected nodeSelector to be set")
+		}
+
+		tolerations, _, _ := unstructured.NestedSlice(notebook.Object, "spec", "template", "spec", "tolerations")
+		if len(tolerations) != 1 {
+			t.Errorf("expected 1 toleration, got %d", len(tolerations))
+		}
+	})
+
+	t.Run("succeeds with empty identifiers", func(t *testing.T) {
+		hwp := makeHWP(nil, nil, nil)
+		notebook := makeNotebook("nb", "ns")
+
+		err := applyHardwareProfileToNotebook(hwp, notebook)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("returns error for missing main container", func(t *testing.T) {
+		hwp := makeHWP(nil, nil, []interface{}{
+			map[string]interface{}{"identifier": "cpu", "defaultCount": "1"},
+		})
+
+		notebook := &unstructured.Unstructured{
+			Object: map[string]interface{}{
+				"metadata": map[string]interface{}{"name": "nb", "namespace": "ns"},
+				"spec": map[string]interface{}{
+					"template": map[string]interface{}{
+						"spec": map[string]interface{}{
+							"containers": []interface{}{
+								map[string]interface{}{"name": "wrong-name", "image": "img"},
 							},
 						},
 					},
 				},
-				"identifiers": []interface{}{
-					map[string]interface{}{
-						"identifier": "cpu",
-						"minCount":   "1",
-						"maxCount":   "4",
-					},
-				},
 			},
-		},
+		}
+
+		err := applyHardwareProfileToNotebook(hwp, notebook)
+		if err == nil {
+			t.Error("expected error for missing container, got nil")
+		}
+	})
+}
+
+func makeHWP(nodeSelector map[string]interface{}, tolerations, identifiers []interface{}) *unstructured.Unstructured {
+	spec := map[string]interface{}{}
+
+	if nodeSelector != nil || tolerations != nil {
+		node := map[string]interface{}{}
+		if nodeSelector != nil {
+			node["nodeSelector"] = nodeSelector
+		}
+
+		if tolerations != nil {
+			node["tolerations"] = tolerations
+		}
+
+		spec["scheduling"] = map[string]interface{}{"node": node}
 	}
 
-	notebook := &unstructured.Unstructured{
+	if identifiers != nil {
+		spec["identifiers"] = identifiers
+	}
+
+	return &unstructured.Unstructured{
+		Object: map[string]interface{}{"spec": spec},
+	}
+}
+
+func makeNotebook(name, namespace string) *unstructured.Unstructured {
+	return &unstructured.Unstructured{
 		Object: map[string]interface{}{
-			"metadata": map[string]interface{}{
-				"name":      "my-notebook",
-				"namespace": "test-ns",
-			},
+			"metadata": map[string]interface{}{"name": name, "namespace": namespace},
 			"spec": map[string]interface{}{
 				"template": map[string]interface{}{
 					"spec": map[string]interface{}{
 						"containers": []interface{}{
-							map[string]interface{}{
-								"name":  "my-notebook",
-								"image": "test-image:latest",
-							},
+							map[string]interface{}{"name": name, "image": "test-image:latest"},
 						},
 					},
 				},
 			},
 		},
-	}
-
-	err := applyHardwareProfileToNotebook(hwp, notebook)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	nodeSelector, _, _ := unstructured.NestedStringMap(notebook.Object, "spec", "template", "spec", "nodeSelector")
-	if nodeSelector["nvidia.com/gpu.present"] != "true" {
-		t.Error("expected nodeSelector to be set")
-	}
-
-	tolerations, _, _ := unstructured.NestedSlice(notebook.Object, "spec", "template", "spec", "tolerations")
-	if len(tolerations) != 1 {
-		t.Errorf("expected 1 toleration, got %d", len(tolerations))
 	}
 }

@@ -1,0 +1,52 @@
+name: E2E Tests
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  e2e:
+    name: E2E Tests (Kind)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+
+      - name: Create Kind cluster
+        uses: helm/kind-action@v1
+        with:
+          cluster_name: workbenches-e2e
+
+      - name: Build operator image
+        run: |
+          make docker-build IMG=workbenches-operator:e2e
+          kind load docker-image workbenches-operator:e2e --name workbenches-e2e
+
+      - name: Install CRDs
+        run: make install
+
+      - name: Deploy operator
+        run: make deploy IMG=workbenches-operator:e2e
+
+      - name: Wait for operator ready
+        run: |
+          kubectl wait --for=condition=Available --timeout=120s \
+            deployment/workbenches-operator-controller-manager \
+            -n workbenches-operator-system
+
+      - name: Run E2E tests
+        run: make test-e2e
+        env:
+          OPERATOR_NAMESPACE: workbenches-operator-system
+
+      - name: Collect logs on failure
+        if: failure()
+        run: |
+          kubectl logs -n workbenches-operator-system \
+            deployment/workbenches-operator-controller-manager \
+            --tail=200 || true
+          kubectl get workbenches -o yaml || true

@@ -26,3 +26,7 @@ jobs:
         with:
           name: coverage
           path: cover.out
+
+      - name: Coverage summary
+        if: always()
+        run: go tool cover -func=cover.out | tail -1
