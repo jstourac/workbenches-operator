@@ -23,7 +23,7 @@ jobs:
 
       - name: Build operator image
         run: |
-          make docker-build IMG=workbenches-operator:e2e
+          make image-build IMG=workbenches-operator:e2e CONTAINER_ENGINE=docker
           kind load docker-image workbenches-operator:e2e --name workbenches-e2e
 
       - name: Install CRDs

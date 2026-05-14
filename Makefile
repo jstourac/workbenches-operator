@@ -1,6 +1,8 @@
 
 # Image URL to use all building/pushing image targets
 IMG ?= quay.io/opendatahub/workbenches-operator:dev
+# Container engine to use for building and pushing images (podman or docker)
+CONTAINER_ENGINE ?= podman
 # ENVTEST_K8S_VERSION refers to the version of kubebuilder assets to be downloaded by envtest binary.
 ENVTEST_K8S_VERSION = 1.32.0
 
@@ -91,21 +93,18 @@ build: manifests generate fmt vet ## Build manager binary.
 run: manifests generate fmt vet ## Run a controller from your host.
 	go run ./cmd/main.go
 
-.PHONY: docker-build
-docker-build: ## Build docker image with the manager.
-	docker build -t $(IMG) .
+.PHONY: image-build
+image-build: ## Build container image with the manager.
+	$(CONTAINER_ENGINE) build -t $(IMG) .
 
-.PHONY: docker-push
-docker-push: ## Push docker image with the manager.
-	docker push $(IMG)
+.PHONY: image-push
+image-push: ## Push container image with the manager.
+	$(CONTAINER_ENGINE) push $(IMG)
 
 PLATFORMS ?= linux/amd64,linux/arm64
-.PHONY: docker-buildx
-docker-buildx: ## Build and push docker image for cross-platform support.
-	- docker buildx create --name workbenches-builder
-	docker buildx use workbenches-builder
-	docker buildx build --push --platform=$(PLATFORMS) --tag $(IMG) .
-	- docker buildx rm workbenches-builder
+.PHONY: image-buildx
+image-buildx: ## Build and push container image for cross-platform support.
+	$(CONTAINER_ENGINE) buildx build --push --platform=$(PLATFORMS) --tag $(IMG) .
 
 ##@ Bundle
 
@@ -120,11 +119,11 @@ bundle: manifests kustomize ## Generate OLM bundle manifests.
 
 .PHONY: bundle-build
 bundle-build: ## Build the bundle image.
-	docker build -f bundle.Dockerfile -t $(BUNDLE_IMG) .
+	$(CONTAINER_ENGINE) build -f bundle.Dockerfile -t $(BUNDLE_IMG) .
 
 .PHONY: bundle-push
 bundle-push: ## Push the bundle image.
-	docker push $(BUNDLE_IMG)
+	$(CONTAINER_ENGINE) push $(BUNDLE_IMG)
 
 ##@ Deployment
 

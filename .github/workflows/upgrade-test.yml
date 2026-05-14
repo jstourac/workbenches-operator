@@ -33,7 +33,7 @@ jobs:
 
       - name: Build and load operator image
         run: |
-          make docker-build IMG=workbenches-operator:upgrade-test
+          make image-build IMG=workbenches-operator:upgrade-test CONTAINER_ENGINE=docker
           kind load docker-image workbenches-operator:upgrade-test --name upgrade-fresh
 
       - name: Install CRDs
@@ -127,7 +127,7 @@ jobs:
 
       - name: Build and load operator image
         run: |
-          make docker-build IMG=workbenches-operator:migration-test
+          make image-build IMG=workbenches-operator:migration-test CONTAINER_ENGINE=docker
           kind load docker-image workbenches-operator:migration-test --name upgrade-migration
 
       - name: Install CRDs

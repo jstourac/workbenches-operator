@@ -20,11 +20,11 @@ jobs:
       - name: Generate and build
         run: make build
 
-  docker-build:
-    name: Docker build
+  image-build:
+    name: Container image build
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Build Docker image
-        run: make docker-build IMG=workbenches-operator:test
+      - name: Build container image
+        run: make image-build IMG=workbenches-operator:test CONTAINER_ENGINE=docker
