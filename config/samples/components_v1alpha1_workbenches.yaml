@@ -5,3 +5,5 @@ metadata:
 spec:
   managementState: Managed
   workbenchNamespace: opendatahub
+  # Possible values: OpenDataHub, SelfManagedRhoai
+  platform: OpenDataHub

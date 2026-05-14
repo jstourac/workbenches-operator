@@ -41,6 +41,7 @@ rules:
   - admissionregistration.k8s.io
   resources:
   - mutatingwebhookconfigurations
+  - validatingwebhookconfigurations
   verbs:
   - create
   - delete
@@ -54,8 +55,11 @@ rules:
   resources:
   - customresourcedefinitions
   verbs:
+  - create
   - get
   - list
+  - patch
+  - update
   - watch
 - apiGroups:
   - apps
@@ -102,6 +106,18 @@ rules:
   - patch
   - update
 - apiGroups:
+  - image.openshift.io
+  resources:
+  - imagestreams
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
   - infrastructure.platform.opendatahub.io
   resources:
   - hardwareprofiles
@@ -129,8 +145,10 @@ rules:
   - rolebindings
   - roles
   verbs:
+  - bind
   - create
   - delete
+  - escalate
   - get
   - list
   - patch

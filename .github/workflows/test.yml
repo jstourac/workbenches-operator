@@ -30,3 +30,19 @@ jobs:
       - name: Coverage summary
         if: always()
         run: go tool cover -func=cover.out | tail -1
+
+  manifest-render-test:
+    name: Manifest Rendering
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+
+      - name: Fetch upstream manifests
+        run: make manifests-fetch
+
+      - name: Validate manifest rendering
+        run: go test ./internal/controller/ -run TestRenderRealManifests -v -count=1

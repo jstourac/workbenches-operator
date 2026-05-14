@@ -46,7 +46,7 @@ type WorkbenchesSpec struct {
 	// Projected by the orchestrator from the platform GatewayConfig.
 	GatewayDomain string `json:"gatewayDomain,omitempty"`
 
-	// platform identifies the platform type (OpenDataHub, SelfManagedRhoai, ManagedRhoai).
+	// platform identifies the platform type (OpenDataHub, SelfManagedRhoai).
 	// Projected by the orchestrator.
 	Platform string `json:"platform,omitempty"`
 

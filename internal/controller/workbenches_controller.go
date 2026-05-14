@@ -30,8 +30,10 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/util/workqueue"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	componentsv1alpha1 "github.com/opendatahub-io/workbenches-operator/api/v1alpha1"
@@ -47,6 +49,9 @@ const (
 	phaseReady                         = "Ready"
 	phaseNotReady                      = "Not Ready"
 	requeueDelay                       = 30 * time.Second
+
+	rateLimiterBaseDelay = 5 * time.Second
+	rateLimiterMaxDelay  = 5 * time.Minute
 )
 
 // WorkbenchesReconciler reconciles a Workbenches object.
@@ -64,11 +69,12 @@ type WorkbenchesReconciler struct {
 // +kubebuilder:rbac:groups="",resources=configmaps;secrets;services;serviceaccounts,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=clusterroles;clusterrolebindings;roles;rolebindings,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=admissionregistration.k8s.io,resources=mutatingwebhookconfigurations,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=apiextensions.k8s.io,resources=customresourcedefinitions,verbs=get;list;watch
+// +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=clusterroles;clusterrolebindings;roles;rolebindings,verbs=get;list;watch;create;update;patch;delete;escalate;bind
+// +kubebuilder:rbac:groups=admissionregistration.k8s.io,resources=mutatingwebhookconfigurations;validatingwebhookconfigurations,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=apiextensions.k8s.io,resources=customresourcedefinitions,verbs=get;list;watch;create;update;patch
 // +kubebuilder:rbac:groups=kubeflow.org,resources=notebooks,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=authorization.k8s.io,resources=subjectaccessreviews,verbs=create
+// +kubebuilder:rbac:groups=image.openshift.io,resources=imagestreams,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=infrastructure.platform.opendatahub.io,resources=hardwareprofiles,verbs=get;list;watch
 
 // Reconcile handles the reconciliation loop for Workbenches resources.
@@ -92,6 +98,8 @@ func (r *WorkbenchesReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 }
 
 // SetupWithManager sets up the controller with the Manager.
+// A custom rate limiter is configured with exponential backoff (5s base, 5m max)
+// to avoid tight retry loops on persistent failures like missing manifests.
 func (r *WorkbenchesReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&componentsv1alpha1.Workbenches{}).
@@ -105,6 +113,12 @@ func (r *WorkbenchesReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&rbacv1.Role{}).
 		Owns(&rbacv1.RoleBinding{}).
 		Named("workbenches").
+		WithOptions(controller.Options{
+			RateLimiter: workqueue.NewTypedItemExponentialFailureRateLimiter[ctrl.Request](
+				rateLimiterBaseDelay,
+				rateLimiterMaxDelay,
+			),
+		}).
 		Complete(r)
 }
 
@@ -145,6 +159,12 @@ func (r *WorkbenchesReconciler) reconcileManaged(ctx context.Context, wb *compon
 
 	params := r.computeKustomizeParams(wb)
 	l.V(1).Info("computed kustomize params", "params", params)
+
+	nsName := r.resolveWorkbenchNamespace(wb)
+
+	if err := r.renderAndApply(ctx, params, nsName, wb.Spec.Platform); err != nil {
+		return r.setErrorStatus(ctx, wb, "ManifestApplyFailed", err)
+	}
 
 	meta.SetStatusCondition(&wb.Status.Conditions, metav1.Condition{
 		Type:               conditionTypeProvisioningSucceeded,
@@ -345,5 +365,5 @@ func (r *WorkbenchesReconciler) setErrorStatus(
 		log.FromContext(ctx).Error(err, "failed to update error status")
 	}
 
-	return ctrl.Result{RequeueAfter: requeueDelay}, reconcileErr
+	return ctrl.Result{}, reconcileErr
 }

@@ -30,7 +30,6 @@ func TestSectionTitle(t *testing.T) {
 	}{
 		{name: "ODH", platform: platform.OpenDataHub, want: "OpenShift Open Data Hub"},
 		{name: "SelfManaged", platform: platform.SelfManagedRhoai, want: "OpenShift Self Managed Services"},
-		{name: "Managed", platform: platform.ManagedRhoai, want: "OpenShift Managed Services"},
 		{name: "unknown defaults to SelfManaged", platform: "unknown", want: "OpenShift Self Managed Services"},
 		{name: "empty defaults to SelfManaged", platform: "", want: "OpenShift Self Managed Services"},
 	}
@@ -53,7 +52,6 @@ func TestDefaultNotebooksNamespace(t *testing.T) {
 	}{
 		{name: "ODH", platform: platform.OpenDataHub, want: platform.DefaultNotebooksNamespaceODH},
 		{name: "SelfManaged", platform: platform.SelfManagedRhoai, want: platform.DefaultNotebooksNamespaceRHOAI},
-		{name: "Managed", platform: platform.ManagedRhoai, want: platform.DefaultNotebooksNamespaceRHOAI},
 		{name: "unknown defaults to ODH", platform: "unknown", want: platform.DefaultNotebooksNamespaceODH},
 	}
 

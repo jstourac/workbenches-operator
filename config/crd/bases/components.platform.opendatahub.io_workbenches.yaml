@@ -73,7 +73,7 @@ spec:
                 type: boolean
               platform:
                 description: |-
-                  platform identifies the platform type (OpenDataHub, SelfManagedRhoai, ManagedRhoai).
+                  platform identifies the platform type (OpenDataHub, SelfManagedRhoai).
                   Projected by the orchestrator.
                 type: string
               workbenchNamespace:

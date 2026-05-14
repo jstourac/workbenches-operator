@@ -21,7 +21,6 @@ package platform
 const (
 	OpenDataHub      = "OpenDataHub"
 	SelfManagedRhoai = "SelfManagedRhoai"
-	ManagedRhoai     = "ManagedRhoai"
 )
 
 // Default notebook namespace per platform.
@@ -34,7 +33,6 @@ const (
 func SectionTitle(platformType string) string {
 	titles := map[string]string{
 		SelfManagedRhoai: "OpenShift Self Managed Services",
-		ManagedRhoai:     "OpenShift Managed Services",
 		OpenDataHub:      "OpenShift Open Data Hub",
 	}
 
@@ -48,7 +46,7 @@ func SectionTitle(platformType string) string {
 // DefaultNotebooksNamespace returns the default workbench namespace for the given platform.
 func DefaultNotebooksNamespace(platformType string) string {
 	switch platformType {
-	case SelfManagedRhoai, ManagedRhoai:
+	case SelfManagedRhoai:
 		return DefaultNotebooksNamespaceRHOAI
 	default:
 		return DefaultNotebooksNamespaceODH
