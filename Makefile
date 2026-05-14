@@ -93,39 +93,52 @@ build: manifests generate fmt vet ## Build manager binary.
 run: manifests generate fmt vet ## Run a controller from your host.
 	go run ./cmd/main.go
 
+# Operator image — the main deliverable.
+# Contains the compiled manager binary and operand manifests.
+# Deploy this image to run the workbenches-operator on a cluster.
+#   make image-build IMG=quay.io/myorg/workbenches-operator:v1.0.0
+#   make image-build-push IMG=quay.io/myorg/workbenches-operator:v1.0.0
+
 .PHONY: image-build
-image-build: ## Build container image with the manager.
+image-build: ## Build the operator container image.
 	$(CONTAINER_ENGINE) build -t $(IMG) .
 
 .PHONY: image-push
-image-push: ## Push container image with the manager.
+image-push: ## Push the operator container image to a registry.
 	$(CONTAINER_ENGINE) push $(IMG)
 
 .PHONY: image-build-push
-image-build-push: image-build image-push ## Build and push container image with the manager.
+image-build-push: image-build image-push ## Build and push the operator container image.
 
 PLATFORMS ?= linux/amd64,linux/arm64
 .PHONY: image-buildx
-image-buildx: ## Build and push container image for cross-platform support.
+image-buildx: ## Build and push the operator image for multiple architectures.
 	$(CONTAINER_ENGINE) buildx build --push --platform=$(PLATFORMS) --tag $(IMG) .
 
+# OLM (Operator Lifecycle Manager) bundle image.
+# Packages the CSV, CRD, RBAC, and webhook manifests for OLM-based installation
+# (e.g. OperatorHub, OLM catalogs, disconnected environments).
+# The bundle image references the operator image — build the operator image first.
+#   1. make bundle IMG=quay.io/myorg/workbenches-operator:v1.0.0
+#   2. make bundle-build
+#   3. make bundle-push
 ##@ Bundle
 
 BUNDLE_IMG ?= $(IMG)-bundle:v$(VERSION)
 VERSION ?= 0.1.0
 
 .PHONY: bundle
-bundle: manifests kustomize ## Generate OLM bundle manifests.
+bundle: manifests kustomize ## Generate OLM bundle manifests from the current kustomize output.
 	cd config/manager && $(KUSTOMIZE) edit set image controller=$(IMG)
 	$(KUSTOMIZE) build config/default > bundle/manifests/workbenches-operator-resources.yaml
 	@echo "Bundle generated in bundle/"
 
 .PHONY: bundle-build
-bundle-build: ## Build the bundle image.
+bundle-build: ## Build the OLM bundle image (contains CSV, CRD, and metadata).
 	$(CONTAINER_ENGINE) build -f bundle.Dockerfile -t $(BUNDLE_IMG) .
 
 .PHONY: bundle-push
-bundle-push: ## Push the bundle image.
+bundle-push: ## Push the OLM bundle image to a registry.
 	$(CONTAINER_ENGINE) push $(BUNDLE_IMG)
 
 ##@ Deployment
