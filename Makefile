@@ -128,8 +128,9 @@ image-buildx: ## Build and push the operator image for multiple architectures.
 #   3. make bundle-push
 ##@ Bundle
 
-BUNDLE_IMG ?= $(IMG)-bundle:v$(VERSION)
 VERSION ?= 0.1.0
+IMG_REPO ?= $(firstword $(subst :, ,$(IMG)))
+BUNDLE_IMG ?= $(IMG_REPO)-bundle:v$(VERSION)
 
 .PHONY: bundle
 bundle: manifests kustomize ## Generate OLM bundle manifests from the current kustomize output.
