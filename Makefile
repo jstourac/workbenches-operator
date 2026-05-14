@@ -101,6 +101,9 @@ image-build: ## Build container image with the manager.
 image-push: ## Push container image with the manager.
 	$(CONTAINER_ENGINE) push $(IMG)
 
+.PHONY: image-build-push
+image-build-push: image-build image-push ## Build and push container image with the manager.
+
 PLATFORMS ?= linux/amd64,linux/arm64
 .PHONY: image-buildx
 image-buildx: ## Build and push container image for cross-platform support.
