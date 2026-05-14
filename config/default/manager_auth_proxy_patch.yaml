@@ -13,3 +13,4 @@ spec:
         - --health-probe-bind-address=:8081
         - --metrics-bind-address=:8443
         - --metrics-secure=true
+        - --enable-webhooks=false
