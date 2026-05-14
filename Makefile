@@ -135,7 +135,7 @@ BUNDLE_IMG ?= $(IMG_REPO)-bundle:v$(VERSION)
 .PHONY: bundle
 bundle: manifests kustomize ## Generate OLM bundle manifests from the current kustomize output.
 	cd config/manager && $(KUSTOMIZE) edit set image controller=$(IMG)
-	$(KUSTOMIZE) build config/default > bundle/manifests/workbenches-operator-resources.yaml
+	$(KUSTOMIZE) build config/crd > bundle/manifests/workbenches-operator-crd.yaml
 	@echo "Bundle generated in bundle/"
 
 .PHONY: bundle-build
@@ -145,6 +145,72 @@ bundle-build: ## Build the OLM bundle image (contains CSV, CRD, and metadata).
 .PHONY: bundle-push
 bundle-push: ## Push the OLM bundle image to a registry.
 	$(CONTAINER_ENGINE) push $(BUNDLE_IMG)
+
+##@ Catalog
+
+CATALOG_IMG ?= $(IMG_REPO)-catalog:v$(VERSION)
+CATALOG_DIR ?= catalog
+
+.PHONY: catalog-render
+catalog-render: opm ## Render a file-based catalog (FBC) from the bundle image.
+	rm -rf $(CATALOG_DIR)
+	mkdir -p $(CATALOG_DIR)
+	$(OPM) render $(BUNDLE_IMG) -o yaml > $(CATALOG_DIR)/operator.yaml
+	@printf '%s\n' \
+		"---" \
+		"schema: olm.package" \
+		"name: workbenches-operator" \
+		"defaultChannel: alpha" \
+		"---" \
+		"schema: olm.channel" \
+		"package: workbenches-operator" \
+		"name: alpha" \
+		"entries:" \
+		"  - name: workbenches-operator.v$(VERSION)" \
+		>> $(CATALOG_DIR)/operator.yaml
+	$(OPM) validate $(CATALOG_DIR)
+	@echo "File-based catalog generated in $(CATALOG_DIR)/"
+
+.PHONY: catalog-build
+catalog-build: catalog-render ## Build an OLM catalog image from the file-based catalog.
+	$(CONTAINER_ENGINE) build -t $(CATALOG_IMG) -f catalog.Dockerfile .
+
+.PHONY: catalog-push
+catalog-push: ## Push the OLM catalog image to a registry.
+	$(CONTAINER_ENGINE) push $(CATALOG_IMG)
+
+.PHONY: catalog-build-push
+catalog-build-push: catalog-build catalog-push ## Build and push the OLM catalog image.
+
+.PHONY: olm-deploy
+olm-deploy: image-build-push bundle bundle-build bundle-push catalog-build-push ## Build and push operator, bundle, and catalog images for OLM deployment.
+
+CATALOG_NAMESPACE ?= openshift-marketplace
+CATALOG_SOURCE_NAME ?= workbenches-operator
+
+.PHONY: catalog-source-apply
+catalog-source-apply: ## Create or update a CatalogSource on the cluster for the catalog image.
+	@printf '%s\n' \
+		"apiVersion: operators.coreos.com/v1alpha1" \
+		"kind: CatalogSource" \
+		"metadata:" \
+		"  name: $(CATALOG_SOURCE_NAME)" \
+		"  namespace: $(CATALOG_NAMESPACE)" \
+		"spec:" \
+		"  sourceType: grpc" \
+		"  image: $(CATALOG_IMG)" \
+		"  displayName: Workbenches Operator" \
+		"  publisher: Red Hat" \
+		"  updateStrategy:" \
+		"    registryPoll:" \
+		"      interval: 10m" \
+		| kubectl apply -f -
+	@echo "CatalogSource $(CATALOG_SOURCE_NAME) applied in $(CATALOG_NAMESPACE)"
+
+.PHONY: catalog-source-delete
+catalog-source-delete: ## Delete the CatalogSource from the cluster.
+	kubectl delete catalogsource $(CATALOG_SOURCE_NAME) -n $(CATALOG_NAMESPACE) --ignore-not-found
+	@echo "CatalogSource $(CATALOG_SOURCE_NAME) deleted from $(CATALOG_NAMESPACE)"
 
 ##@ Deployment
 
@@ -181,12 +247,14 @@ KUSTOMIZE ?= $(LOCALBIN)/kustomize
 CONTROLLER_GEN ?= $(LOCALBIN)/controller-gen
 ENVTEST ?= $(LOCALBIN)/setup-envtest
 GOLANGCI_LINT ?= $(LOCALBIN)/golangci-lint
+OPM ?= $(LOCALBIN)/opm
 
 ## Tool Versions
 KUSTOMIZE_VERSION ?= v5.6.0
 CONTROLLER_TOOLS_VERSION ?= v0.18.0
 ENVTEST_VERSION ?= release-0.23
 GOLANGCI_LINT_VERSION ?= v2.5.0
+OPM_VERSION ?= v1.66.0
 
 .PHONY: kustomize
 kustomize: $(KUSTOMIZE) ## Download kustomize locally if necessary.
@@ -207,6 +275,19 @@ $(ENVTEST): $(LOCALBIN)
 golangci-lint: $(GOLANGCI_LINT) ## Download golangci-lint locally if necessary.
 $(GOLANGCI_LINT): $(LOCALBIN)
 	$(call go-install-tool,$(GOLANGCI_LINT),github.com/golangci/golangci-lint/v2/cmd/golangci-lint,$(GOLANGCI_LINT_VERSION))
+
+.PHONY: opm
+opm: $(OPM) ## Download opm locally if necessary.
+$(OPM): $(LOCALBIN)
+	@[ -f "$(OPM)-$(OPM_VERSION)" ] || { \
+		set -e; \
+		echo "Downloading opm $(OPM_VERSION)"; \
+		OS=$(shell go env GOOS) && ARCH=$(shell go env GOARCH) && \
+		curl -sSLo $(OPM) https://github.com/operator-framework/operator-registry/releases/download/$(OPM_VERSION)/$${OS}-$${ARCH}-opm && \
+		chmod +x $(OPM) && \
+		mv $(OPM) $(OPM)-$(OPM_VERSION); \
+	}
+	@ln -sf $(OPM)-$(OPM_VERSION) $(OPM)
 
 # go-install-tool will 'go install' any package with custom target and target directory.
 # $1 - target path, $2 - package, $3 - version
