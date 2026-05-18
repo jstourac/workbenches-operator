@@ -70,6 +70,14 @@ unit-test: manifests generate envtest ## Run unit tests (no fmt/vet check).
 	KUBEBUILDER_ASSETS="$(shell "$(ENVTEST)" use $(ENVTEST_K8S_VERSION) --bin-dir "$(LOCALBIN)" -p path)" \
 		go test $$(go list ./... | grep -v /e2e | grep -v /tests/) -coverprofile cover.out
 
+.PHONY: test-e2e
+test-e2e: ## Run end-to-end tests against the cluster specified in ~/.kube/config.
+	go test ./tests/e2e/ -v -timeout 30m
+
+.PHONY: test-upgrade
+test-upgrade: ## Run upgrade and migration tests against the cluster specified in ~/.kube/config.
+	go test ./tests/upgrade/ -v -timeout 30m
+
 .PHONY: test-coverage
 test-coverage: test ## Generate HTML coverage report.
 	go tool cover -html=cover.out -o coverage.html

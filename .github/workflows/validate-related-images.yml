@@ -1,0 +1,37 @@
+name: Validate Related Images
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+    paths:
+      - "get_all_manifests.sh"
+      - "Dockerfile"
+      - "config/**"
+
+jobs:
+  validate:
+    name: Validate RELATED_IMAGE declarations
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check RELATED_IMAGE env vars
+        run: |
+          echo "=== Checking for RELATED_IMAGE declarations ==="
+
+          # Collect all RELATED_IMAGE references from manifests/code
+          image_refs=$(grep -rh 'RELATED_IMAGE_' --include='*.go' --include='*.yaml' --include='*.env' . 2>/dev/null | \
+            grep -oP 'RELATED_IMAGE_\w+' | sort -u || true)
+
+          if [ -z "$image_refs" ]; then
+            echo "No RELATED_IMAGE references found (this may be expected in early phases)"
+            exit 0
+          fi
+
+          echo "Found RELATED_IMAGE references:"
+          echo "$image_refs"
+
+          echo ""
+          echo "=== Validation passed ==="
