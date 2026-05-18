@@ -34,6 +34,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	componentsv1alpha1 "github.com/opendatahub-io/workbenches-operator/api/v1alpha1"
@@ -52,6 +53,8 @@ const (
 
 	rateLimiterBaseDelay = 5 * time.Second
 	rateLimiterMaxDelay  = 5 * time.Minute
+
+	workbenchesFinalizer = "components.platform.opendatahub.io/workbenches-cleanup"
 )
 
 // WorkbenchesReconciler reconciles a Workbenches object.
@@ -71,7 +74,7 @@ type WorkbenchesReconciler struct {
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=clusterroles;clusterrolebindings;roles;rolebindings,verbs=get;list;watch;create;update;patch;delete;escalate;bind
 // +kubebuilder:rbac:groups=admissionregistration.k8s.io,resources=mutatingwebhookconfigurations;validatingwebhookconfigurations,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=apiextensions.k8s.io,resources=customresourcedefinitions,verbs=get;list;watch;create;update;patch
+// +kubebuilder:rbac:groups=apiextensions.k8s.io,resources=customresourcedefinitions,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=kubeflow.org,resources=notebooks,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=authorization.k8s.io,resources=subjectaccessreviews,verbs=create
 // +kubebuilder:rbac:groups=image.openshift.io,resources=imagestreams,verbs=get;list;watch;create;update;patch;delete
@@ -89,6 +92,18 @@ func (r *WorkbenchesReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	}
 
 	l.Info("reconciling Workbenches", "name", workbenches.Name, "generation", workbenches.Generation)
+
+	if !workbenches.DeletionTimestamp.IsZero() {
+		return r.reconcileDelete(ctx, workbenches)
+	}
+
+	if !controllerutil.ContainsFinalizer(workbenches, workbenchesFinalizer) {
+		controllerutil.AddFinalizer(workbenches, workbenchesFinalizer)
+
+		if err := r.Update(ctx, workbenches); err != nil {
+			return ctrl.Result{}, fmt.Errorf("failed to add finalizer: %w", err)
+		}
+	}
 
 	if workbenches.Spec.ManagementState == "Removed" {
 		return r.reconcileRemoved(ctx, workbenches)
@@ -126,6 +141,12 @@ func (r *WorkbenchesReconciler) reconcileRemoved(ctx context.Context, wb *compon
 	l := log.FromContext(ctx)
 	l.Info("workbenches management state is Removed")
 
+	nsName := r.resolveWorkbenchNamespace(wb)
+
+	if err := r.cleanupManagedResources(ctx, nsName); err != nil {
+		return r.setErrorStatus(ctx, wb, "CleanupFailed", err)
+	}
+
 	meta.SetStatusCondition(&wb.Status.Conditions, metav1.Condition{
 		Type:               conditionTypeReady,
 		Status:             metav1.ConditionFalse,
@@ -148,6 +169,29 @@ func (r *WorkbenchesReconciler) reconcileRemoved(ctx context.Context, wb *compon
 	err := r.Status().Update(ctx, wb)
 
 	return ctrl.Result{}, err
+}
+
+func (r *WorkbenchesReconciler) reconcileDelete(ctx context.Context, wb *componentsv1alpha1.Workbenches) (ctrl.Result, error) {
+	l := log.FromContext(ctx)
+	l.Info("workbenches CR is being deleted, cleaning up managed resources")
+
+	if controllerutil.ContainsFinalizer(wb, workbenchesFinalizer) {
+		nsName := r.resolveWorkbenchNamespace(wb)
+
+		if err := r.cleanupManagedResources(ctx, nsName); err != nil {
+			l.Error(err, "failed to cleanup managed resources")
+
+			return ctrl.Result{}, err
+		}
+
+		controllerutil.RemoveFinalizer(wb, workbenchesFinalizer)
+
+		if err := r.Update(ctx, wb); err != nil {
+			return ctrl.Result{}, fmt.Errorf("failed to remove finalizer: %w", err)
+		}
+	}
+
+	return ctrl.Result{}, nil
 }
 
 func (r *WorkbenchesReconciler) reconcileManaged(ctx context.Context, wb *componentsv1alpha1.Workbenches) (ctrl.Result, error) {

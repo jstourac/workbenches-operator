@@ -17,13 +17,22 @@ limitations under the License.
 package controller
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"testing"
 
+	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
+	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/kustomize/kyaml/filesys"
 
 	"github.com/opendatahub-io/workbenches-operator/internal/metadata"
@@ -674,5 +683,101 @@ func TestRenderRealManifests(t *testing.T) {
 				t.Logf("  %s: rendered %d objects", group, len(objects))
 			}
 		})
+	}
+}
+
+func TestCleanupManagedResources(t *testing.T) {
+	scheme := runtime.NewScheme()
+	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
+	utilruntime.Must(appsv1.AddToScheme(scheme))
+
+	namespace := "test-cleanup-ns"
+
+	labeledDeploy := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "notebook-controller",
+			Namespace: namespace,
+			Labels: map[string]string{
+				metadata.ComponentLabelKey: metadata.LabelTrue,
+			},
+		},
+		Spec: appsv1.DeploymentSpec{
+			Selector: &metav1.LabelSelector{
+				MatchLabels: map[string]string{"app": "notebook-controller"},
+			},
+			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"app": "notebook-controller"}},
+				Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Image: "img"}}},
+			},
+		},
+	}
+
+	unlabeledDeploy := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "other-deployment",
+			Namespace: namespace,
+		},
+		Spec: appsv1.DeploymentSpec{
+			Selector: &metav1.LabelSelector{
+				MatchLabels: map[string]string{"app": "other"},
+			},
+			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"app": "other"}},
+				Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Image: "img"}}},
+			},
+		},
+	}
+
+	labeledSvc := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "notebook-svc",
+			Namespace: namespace,
+			Labels: map[string]string{
+				metadata.ComponentLabelKey: metadata.LabelTrue,
+			},
+		},
+		Spec: corev1.ServiceSpec{
+			Ports: []corev1.ServicePort{{Port: 80}},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(labeledDeploy, unlabeledDeploy, labeledSvc).
+		Build()
+
+	reconciler := &WorkbenchesReconciler{
+		Client: fakeClient,
+		Scheme: scheme,
+	}
+
+	ctx := context.Background()
+
+	if err := reconciler.cleanupManagedResources(ctx, namespace); err != nil {
+		t.Fatalf("cleanupManagedResources() error = %v", err)
+	}
+
+	// Labeled deployment should be gone
+	deployList := &appsv1.DeploymentList{}
+	if err := fakeClient.List(ctx, deployList, client.InNamespace(namespace)); err != nil {
+		t.Fatalf("failed to list deployments: %v", err)
+	}
+
+	if len(deployList.Items) != 1 {
+		t.Errorf("expected 1 remaining deployment, got %d", len(deployList.Items))
+	}
+
+	if len(deployList.Items) > 0 && deployList.Items[0].Name != "other-deployment" {
+		t.Errorf("expected remaining deployment to be 'other-deployment', got %q", deployList.Items[0].Name)
+	}
+
+	// Labeled service should be gone
+	svcList := &corev1.ServiceList{}
+	if err := fakeClient.List(ctx, svcList, client.InNamespace(namespace)); err != nil {
+		t.Fatalf("failed to list services: %v", err)
+	}
+
+	if len(svcList.Items) != 0 {
+		t.Errorf("expected 0 services, got %d", len(svcList.Items))
 	}
 }

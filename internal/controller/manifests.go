@@ -25,6 +25,7 @@ import (
 	"strings"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/kustomize/api/krusty"
@@ -280,6 +281,79 @@ var clusterScopedKinds = map[string]bool{
 
 func isNamespaced(obj *unstructured.Unstructured) bool {
 	return !clusterScopedKinds[obj.GetKind()]
+}
+
+// cleanupGVKs lists the GroupVersionKinds of namespaced resources to clean up.
+var cleanupGVKs = []schema.GroupVersionKind{
+	{Group: "apps", Version: "v1", Kind: "Deployment"},
+	{Group: "", Version: "v1", Kind: "ConfigMap"},
+	{Group: "", Version: "v1", Kind: "Service"},
+	{Group: "", Version: "v1", Kind: "ServiceAccount"},
+	{Group: "rbac.authorization.k8s.io", Version: "v1", Kind: "Role"},
+	{Group: "rbac.authorization.k8s.io", Version: "v1", Kind: "RoleBinding"},
+}
+
+// cleanupClusterGVKs lists the GroupVersionKinds of cluster-scoped resources to clean up.
+var cleanupClusterGVKs = []schema.GroupVersionKind{
+	{Group: "rbac.authorization.k8s.io", Version: "v1", Kind: "ClusterRole"},
+	{Group: "rbac.authorization.k8s.io", Version: "v1", Kind: "ClusterRoleBinding"},
+	{Group: "admissionregistration.k8s.io", Version: "v1", Kind: "MutatingWebhookConfiguration"},
+	{Group: "admissionregistration.k8s.io", Version: "v1", Kind: "ValidatingWebhookConfiguration"},
+	{Group: "image.openshift.io", Version: "v1", Kind: "ImageStream"},
+	{Group: "apiextensions.k8s.io", Version: "v1", Kind: "CustomResourceDefinition"},
+}
+
+// cleanupManagedResources deletes all resources that were applied by this operator,
+// identified by the component label. It cleans both namespaced and cluster-scoped resources.
+func (r *WorkbenchesReconciler) cleanupManagedResources(ctx context.Context, namespace string) error {
+	l := log.FromContext(ctx)
+	l.Info("cleaning up managed resources", "namespace", namespace)
+
+	componentLabel := client.MatchingLabels{metadata.ComponentLabelKey: metadata.LabelTrue}
+
+	for _, gvk := range cleanupGVKs {
+		list := &unstructured.UnstructuredList{}
+		list.SetGroupVersionKind(gvk)
+
+		if err := r.List(ctx, list, client.InNamespace(namespace), componentLabel); err != nil {
+			l.V(1).Info("skipping GVK during cleanup (list failed)", "gvk", gvk, "error", err)
+
+			continue
+		}
+
+		for i := range list.Items {
+			obj := &list.Items[i]
+			l.Info("deleting resource", "kind", obj.GetKind(), "name", obj.GetName(), "namespace", obj.GetNamespace())
+
+			if err := r.Delete(ctx, obj); client.IgnoreNotFound(err) != nil {
+				return fmt.Errorf("failed to delete %s %s/%s: %w", obj.GetKind(), obj.GetNamespace(), obj.GetName(), err)
+			}
+		}
+	}
+
+	for _, gvk := range cleanupClusterGVKs {
+		list := &unstructured.UnstructuredList{}
+		list.SetGroupVersionKind(gvk)
+
+		if err := r.List(ctx, list, componentLabel); err != nil {
+			l.V(1).Info("skipping cluster GVK during cleanup (list failed)", "gvk", gvk, "error", err)
+
+			continue
+		}
+
+		for i := range list.Items {
+			obj := &list.Items[i]
+			l.Info("deleting cluster resource", "kind", obj.GetKind(), "name", obj.GetName())
+
+			if err := r.Delete(ctx, obj); client.IgnoreNotFound(err) != nil {
+				return fmt.Errorf("failed to delete %s %s: %w", obj.GetKind(), obj.GetName(), err)
+			}
+		}
+	}
+
+	l.Info("managed resources cleanup complete")
+
+	return nil
 }
 
 // ensureKustomization creates a minimal kustomization.yaml if one does not exist,
