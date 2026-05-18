@@ -254,6 +254,58 @@ var _ = Describe("Workbenches Controller", func() {
 		})
 	})
 
+	Context("Finalizer management", func() {
+		It("Should add the finalizer on first reconcile", func() {
+			nsName := "test-ns-finalizer-add"
+			wb := createWorkbenches("Managed", nsName, "OpenDataHub")
+
+			DeferCleanup(func() {
+				cleanupWorkbenches(wb)
+				cleanupNamespace(nsName)
+			})
+
+			_, err := reconciler.Reconcile(ctx, requestFor(wb))
+			Expect(err).NotTo(HaveOccurred())
+
+			updated := getWorkbenches(wb.Name)
+			Expect(updated.Finalizers).To(ContainElement("components.platform.opendatahub.io/workbenches-cleanup"))
+		})
+
+		It("Should clean up labeled resources and remove finalizer on deletion", func() {
+			nsName := "test-ns-finalizer-del"
+			createNamespace(nsName)
+			createDeployment(nsName, "notebook-controller-deployment", 1)
+
+			wb := createWorkbenches("Managed", nsName, "OpenDataHub")
+
+			DeferCleanup(func() {
+				cleanupDeployments(nsName)
+				cleanupNamespace(nsName)
+			})
+
+			// First reconcile adds the finalizer
+			_, err := reconciler.Reconcile(ctx, requestFor(wb))
+			Expect(err).NotTo(HaveOccurred())
+
+			updated := getWorkbenches(wb.Name)
+			Expect(updated.Finalizers).To(ContainElement("components.platform.opendatahub.io/workbenches-cleanup"))
+
+			// Delete the CR (sets DeletionTimestamp)
+			Expect(k8sClient.Delete(ctx, updated)).To(Succeed())
+
+			// Reconcile should trigger cleanup and remove the finalizer
+			_, err = reconciler.Reconcile(ctx, requestFor(wb))
+			Expect(err).NotTo(HaveOccurred())
+
+			// Verify the deployment was deleted
+			deploys := &appsv1.DeploymentList{}
+			Expect(k8sClient.List(ctx, deploys, client.InNamespace(nsName), client.MatchingLabels{
+				"app.opendatahub.io/workbenches": "true",
+			})).To(Succeed())
+			Expect(deploys.Items).To(BeEmpty())
+		})
+	})
+
 	Context("When transitioning between states", func() {
 		It("Should transition from Managed to Removed", func() {
 			nsName := "test-ns-transition"
