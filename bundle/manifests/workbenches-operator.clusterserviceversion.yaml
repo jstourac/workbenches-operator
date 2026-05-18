@@ -1,0 +1,230 @@
+apiVersion: operators.coreos.com/v1alpha1
+kind: ClusterServiceVersion
+metadata:
+  annotations:
+    alm-examples: |-
+      [
+        {
+          "apiVersion": "components.platform.opendatahub.io/v1alpha1",
+          "kind": "Workbenches",
+          "metadata": {
+            "name": "default"
+          },
+          "spec": {
+            "managementState": "Managed",
+            "workbenchNamespace": "rhods-notebooks",
+            "platform": "SelfManagedRhoai"
+          }
+        }
+      ]
+    capabilities: Seamless Upgrades
+    categories: AI/Machine Learning
+    containerImage: quay.io/opendatahub/workbenches-operator:latest
+    description: Manages Kubeflow Notebook Controller and workbench images for Open Data Hub
+    operatorframework.io/suggested-namespace: workbenches-operator-system
+    repository: https://github.com/opendatahub-io/workbenches-operator
+    support: Red Hat
+  name: workbenches-operator.v0.1.0
+  namespace: placeholder
+spec:
+  apiservicedefinitions: {}
+  customresourcedefinitions:
+    owned:
+      - description: Workbenches manages the deployment and lifecycle of Kubeflow Notebook Controller and workbench images.
+        displayName: Workbenches
+        kind: Workbenches
+        name: workbenches.components.platform.opendatahub.io
+        version: v1alpha1
+  description: |
+    ## Workbenches Operator
+
+    The Workbenches Operator manages the Kubeflow Notebook Controller,
+    ODH Notebook Controller, and workbench/pipeline images for the
+    Open Data Hub platform.
+
+    ### Features
+
+    - Deploys and manages Kubeflow Notebook Controller
+    - Deploys and manages ODH Notebook Controller
+    - Manages workbench images (Jupyter, CodeServer, etc.)
+    - Manages pipeline runtime images
+    - Hardware profile injection via mutating webhooks
+    - Connection secret injection via mutating webhooks
+    - Kueue label validation (disabled by default)
+
+    ### Prerequisites
+
+    - Kubernetes 1.28+
+    - Open Data Hub Operator (orchestrator)
+  displayName: Workbenches Operator
+  icon:
+    - base64data: ""
+      mediatype: image/svg+xml
+  install:
+    spec:
+      deployments:
+        - label:
+            app.kubernetes.io/component: manager
+            app.kubernetes.io/name: workbenches-operator
+            control-plane: controller-manager
+          name: workbenches-operator-controller-manager
+          spec:
+            replicas: 1
+            selector:
+              matchLabels:
+                control-plane: controller-manager
+            template:
+              metadata:
+                labels:
+                  control-plane: controller-manager
+              spec:
+                containers:
+                  - name: manager
+                    image: quay.io/opendatahub/workbenches-operator:latest
+                    command:
+                      - /manager
+                    args:
+                      - --leader-elect
+                      - --health-probe-bind-address=:8081
+                    env:
+                      - name: RELATED_IMAGE_ODH_NOTEBOOK_CONTROLLER_IMAGE
+                        value: quay.io/opendatahub/odh-notebook-controller:latest
+                      - name: RELATED_IMAGE_ODH_KF_NOTEBOOK_CONTROLLER_IMAGE
+                        value: quay.io/opendatahub/odh-kf-notebook-controller:latest
+                      - name: RELATED_IMAGE_ODH_KUBE_RBAC_PROXY_IMAGE
+                        value: gcr.io/kubebuilder/kube-rbac-proxy:v0.16.0
+                      - name: RELATED_IMAGE_ODH_WORKBENCH_JUPYTER_DATASCIENCE_CPU_PY312_IMAGE
+                        value: quay.io/opendatahub/workbench-images:jupyter-datascience-cpu-py312
+                      - name: RELATED_IMAGE_ODH_WORKBENCH_JUPYTER_MINIMAL_CPU_PY312_IMAGE
+                        value: quay.io/opendatahub/workbench-images:jupyter-minimal-cpu-py312
+                      - name: RELATED_IMAGE_ODH_WORKBENCH_CODESERVER_DATASCIENCE_CPU_PY312_IMAGE
+                        value: quay.io/opendatahub/workbench-images:codeserver-datascience-cpu-py312
+                    ports:
+                      - containerPort: 9443
+                        name: webhook-server
+                        protocol: TCP
+                      - containerPort: 8081
+                        name: health
+                        protocol: TCP
+                    livenessProbe:
+                      httpGet:
+                        path: /healthz
+                        port: 8081
+                      initialDelaySeconds: 15
+                      periodSeconds: 20
+                    readinessProbe:
+                      httpGet:
+                        path: /readyz
+                        port: 8081
+                      initialDelaySeconds: 5
+                      periodSeconds: 10
+                    resources:
+                      limits:
+                        cpu: 500m
+                        memory: 128Mi
+                      requests:
+                        cpu: 10m
+                        memory: 64Mi
+                    securityContext:
+                      allowPrivilegeEscalation: false
+                      capabilities:
+                        drop:
+                          - ALL
+                securityContext:
+                  runAsNonRoot: true
+                  seccompProfile:
+                    type: RuntimeDefault
+                serviceAccountName: workbenches-operator-controller-manager
+                terminationGracePeriodSeconds: 10
+      permissions:
+        - rules:
+            - apiGroups: [""]
+              resources: ["configmaps"]
+              verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+            - apiGroups: ["coordination.k8s.io"]
+              resources: ["leases"]
+              verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+            - apiGroups: [""]
+              resources: ["events"]
+              verbs: ["create", "patch"]
+          serviceAccountName: workbenches-operator-controller-manager
+      clusterPermissions:
+        - rules:
+            - apiGroups: ["components.platform.opendatahub.io"]
+              resources: ["workbenches"]
+              verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+            - apiGroups: ["components.platform.opendatahub.io"]
+              resources: ["workbenches/status"]
+              verbs: ["get", "update", "patch"]
+            - apiGroups: ["components.platform.opendatahub.io"]
+              resources: ["workbenches/finalizers"]
+              verbs: ["update"]
+            - apiGroups: [""]
+              resources: ["namespaces"]
+              verbs: ["get", "list", "watch", "create", "update", "patch"]
+            - apiGroups: ["apps"]
+              resources: ["deployments"]
+              verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+            - apiGroups: ["kubeflow.org"]
+              resources: ["notebooks"]
+              verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+            - apiGroups: ["infrastructure.platform.opendatahub.io"]
+              resources: ["hardwareprofiles"]
+              verbs: ["get", "list", "watch"]
+            - apiGroups: ["authorization.k8s.io"]
+              resources: ["subjectaccessreviews"]
+              verbs: ["create"]
+          serviceAccountName: workbenches-operator-controller-manager
+    strategy: deployment
+  installModes:
+    - supported: true
+      type: OwnNamespace
+    - supported: true
+      type: SingleNamespace
+    - supported: false
+      type: MultiNamespace
+    - supported: true
+      type: AllNamespaces
+  keywords:
+    - workbenches
+    - notebooks
+    - jupyter
+    - machine learning
+    - opendatahub
+  maintainers:
+    - email: opendatahub-io@redhat.com
+      name: Open Data Hub Contributors
+  maturity: alpha
+  provider:
+    name: Red Hat
+    url: https://www.redhat.com
+  version: 0.1.0
+  webhookdefinitions:
+    - admissionReviewVersions:
+        - v1
+      containerPort: 9443
+      deploymentName: workbenches-operator-controller-manager
+      failurePolicy: Fail
+      generateName: connection-notebook.opendatahub.io
+      rules:
+        - apiGroups: ["kubeflow.org"]
+          apiVersions: ["v1"]
+          operations: ["CREATE", "UPDATE"]
+          resources: ["notebooks"]
+      sideEffects: None
+      type: MutatingAdmissionWebhook
+      webhookPath: /platform-connection-notebook
+    - admissionReviewVersions:
+        - v1
+      containerPort: 9443
+      deploymentName: workbenches-operator-controller-manager
+      failurePolicy: Fail
+      generateName: hardwareprofile-notebook-injector.opendatahub.io
+      rules:
+        - apiGroups: ["kubeflow.org"]
+          apiVersions: ["v1"]
+          operations: ["CREATE", "UPDATE"]
+          resources: ["notebooks"]
+      sideEffects: None
+      type: MutatingAdmissionWebhook
+      webhookPath: /mutate-hardware-profile

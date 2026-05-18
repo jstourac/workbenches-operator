@@ -1,0 +1,28 @@
+replicaCount: 1
+
+image:
+  repository: quay.io/opendatahub/workbenches-operator
+  tag: latest
+  pullPolicy: IfNotPresent
+
+namespace: workbenches-operator-system
+
+serviceAccount:
+  name: workbenches-operator-controller-manager
+
+resources:
+  limits:
+    cpu: 500m
+    memory: 128Mi
+  requests:
+    cpu: 10m
+    memory: 64Mi
+
+leaderElection:
+  enabled: true
+
+webhooks:
+  enabled: true
+
+manifests:
+  basePath: /opt/manifests

@@ -40,6 +40,7 @@ import (
 var _ = Describe("Workbenches Controller", func() {
 	var (
 		reconciler   *controller.WorkbenchesReconciler
+		nsCounter    int
 		manifestsDir string
 	)
 
@@ -48,6 +49,7 @@ var _ = Describe("Workbenches Controller", func() {
 		manifestsDir, err = os.MkdirTemp("", "wb-test-manifests-*")
 		Expect(err).NotTo(HaveOccurred())
 
+		// Create minimal kustomize directories that renderAndApply expects.
 		kustomizationContent := []byte("apiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\nresources: []\n")
 		for _, sub := range []string{
 			"workbenches/kf-notebook-controller/overlays/openshift",
@@ -65,6 +67,7 @@ var _ = Describe("Workbenches Controller", func() {
 			Scheme:            scheme.Scheme,
 			ManifestsBasePath: manifestsDir,
 		}
+		nsCounter++
 	})
 
 	AfterEach(func() {
@@ -193,7 +196,7 @@ var _ = Describe("Workbenches Controller", func() {
 		It("Should set MLflow and gateway params from spec", func() {
 			nsName := "test-ns-params"
 			wb := &componentsv1alpha1.Workbenches{
-				ObjectMeta: metav1.ObjectMeta{Name: componentsv1alpha1.WorkbenchesInstanceName},
+				ObjectMeta: metav1.ObjectMeta{Name: "default"},
 				Spec: componentsv1alpha1.WorkbenchesSpec{
 					ManagementState:    "Managed",
 					WorkbenchNamespace: nsName,
@@ -402,6 +405,7 @@ func createDeployment(namespace, name string, readyReplicas int32) {
 	}
 	ExpectWithOffset(1, k8sClient.Create(ctx, deploy)).To(Succeed())
 
+	// Update status (envtest doesn't run controllers)
 	deploy.Status.ReadyReplicas = readyReplicas
 	deploy.Status.Replicas = 1
 	deploy.Status.AvailableReplicas = readyReplicas

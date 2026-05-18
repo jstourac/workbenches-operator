@@ -139,29 +139,6 @@ func (r *WorkbenchesReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Complete(r)
 }
 
-func (r *WorkbenchesReconciler) reconcileDelete(ctx context.Context, wb *componentsv1alpha1.Workbenches) (ctrl.Result, error) {
-	l := log.FromContext(ctx)
-	l.Info("workbenches CR is being deleted, cleaning up managed resources")
-
-	if controllerutil.ContainsFinalizer(wb, workbenchesFinalizer) {
-		nsName := r.resolveWorkbenchNamespace(wb)
-
-		if err := r.cleanupManagedResources(ctx, nsName); err != nil {
-			l.Error(err, "failed to cleanup managed resources")
-
-			return ctrl.Result{}, err
-		}
-
-		controllerutil.RemoveFinalizer(wb, workbenchesFinalizer)
-
-		if err := r.Update(ctx, wb); err != nil {
-			return ctrl.Result{}, fmt.Errorf("failed to remove finalizer: %w", err)
-		}
-	}
-
-	return ctrl.Result{}, nil
-}
-
 func (r *WorkbenchesReconciler) reconcileRemoved(ctx context.Context, wb *componentsv1alpha1.Workbenches) (ctrl.Result, error) {
 	l := log.FromContext(ctx)
 	l.Info("workbenches management state is Removed")
@@ -194,6 +171,29 @@ func (r *WorkbenchesReconciler) reconcileRemoved(ctx context.Context, wb *compon
 	err := r.Status().Update(ctx, wb)
 
 	return ctrl.Result{}, err
+}
+
+func (r *WorkbenchesReconciler) reconcileDelete(ctx context.Context, wb *componentsv1alpha1.Workbenches) (ctrl.Result, error) {
+	l := log.FromContext(ctx)
+	l.Info("workbenches CR is being deleted, cleaning up managed resources")
+
+	if controllerutil.ContainsFinalizer(wb, workbenchesFinalizer) {
+		nsName := r.resolveWorkbenchNamespace(wb)
+
+		if err := r.cleanupManagedResources(ctx, nsName); err != nil {
+			l.Error(err, "failed to cleanup managed resources")
+
+			return ctrl.Result{}, err
+		}
+
+		controllerutil.RemoveFinalizer(wb, workbenchesFinalizer)
+
+		if err := r.Update(ctx, wb); err != nil {
+			return ctrl.Result{}, fmt.Errorf("failed to remove finalizer: %w", err)
+		}
+	}
+
+	return ctrl.Result{}, nil
 }
 
 func (r *WorkbenchesReconciler) reconcileManaged(ctx context.Context, wb *componentsv1alpha1.Workbenches) (ctrl.Result, error) {
