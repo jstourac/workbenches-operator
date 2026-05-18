@@ -63,12 +63,12 @@ lint-fix: golangci-lint ## Run golangci-lint linter and perform fixes.
 .PHONY: test
 test: manifests generate fmt vet envtest ## Run tests.
 	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" \
-		go test $$(go list ./... | grep -v /e2e) -coverprofile cover.out
+		go test $$(go list ./... | grep -v /e2e | grep -v /tests/) -coverprofile cover.out
 
 .PHONY: unit-test
 unit-test: manifests generate envtest ## Run unit tests (no fmt/vet check).
 	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" \
-		go test $$(go list ./... | grep -v /e2e) -coverprofile cover.out
+		go test $$(go list ./... | grep -v /e2e | grep -v /tests/) -coverprofile cover.out
 
 .PHONY: test-e2e
 test-e2e: ## Run end-to-end tests against the cluster specified in ~/.kube/config.

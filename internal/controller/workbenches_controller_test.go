@@ -17,6 +17,8 @@ limitations under the License.
 package controller_test
 
 import (
+	"os"
+	"path/filepath"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -37,16 +39,41 @@ import (
 
 var _ = Describe("Workbenches Controller", func() {
 	var (
-		reconciler *controller.WorkbenchesReconciler
-		nsCounter  int
+		reconciler   *controller.WorkbenchesReconciler
+		nsCounter    int
+		manifestsDir string
 	)
 
 	BeforeEach(func() {
+		var err error
+		manifestsDir, err = os.MkdirTemp("", "wb-test-manifests-*")
+		Expect(err).NotTo(HaveOccurred())
+
+		// Create minimal kustomize directories that renderAndApply expects.
+		kustomizationContent := []byte("apiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\nresources: []\n")
+		for _, sub := range []string{
+			"workbenches/kf-notebook-controller/overlays/openshift",
+			"workbenches/odh-notebook-controller/base",
+			"workbenches/notebooks/odh/base",
+			"workbenches/notebooks/rhoai/base",
+		} {
+			dir := filepath.Join(manifestsDir, sub)
+			Expect(os.MkdirAll(dir, 0o755)).To(Succeed())
+			Expect(os.WriteFile(filepath.Join(dir, "kustomization.yaml"), kustomizationContent, 0o644)).To(Succeed())
+		}
+
 		reconciler = &controller.WorkbenchesReconciler{
-			Client: k8sClient,
-			Scheme: scheme.Scheme,
+			Client:            k8sClient,
+			Scheme:            scheme.Scheme,
+			ManifestsBasePath: manifestsDir,
 		}
 		nsCounter++
+	})
+
+	AfterEach(func() {
+		if manifestsDir != "" {
+			os.RemoveAll(manifestsDir)
+		}
 	})
 
 	Context("When reconciling a managed Workbenches resource", func() {
@@ -386,7 +413,19 @@ func createDeployment(namespace, name string, readyReplicas int32) {
 }
 
 func cleanupWorkbenches(wb *componentsv1alpha1.Workbenches) {
-	_ = k8sClient.Delete(ctx, wb)
+	latest := &componentsv1alpha1.Workbenches{}
+
+	err := k8sClient.Get(ctx, client.ObjectKeyFromObject(wb), latest)
+	if err != nil {
+		return
+	}
+
+	if len(latest.Finalizers) > 0 {
+		latest.Finalizers = nil
+		_ = k8sClient.Update(ctx, latest)
+	}
+
+	_ = k8sClient.Delete(ctx, latest)
 }
 
 func cleanupNamespace(name string) {
