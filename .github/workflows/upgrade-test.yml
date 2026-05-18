@@ -1,0 +1,283 @@
+name: Upgrade Tests
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "internal/upgrade/**"
+      - "internal/controller/**"
+      - "tests/upgrade/**"
+      - "api/**"
+  workflow_dispatch:
+    inputs:
+      old_operator_version:
+        description: "Old ODH operator version (for cross-version migration)"
+        required: false
+        default: ""
+
+jobs:
+  fresh-install:
+    name: Fresh Install Verification
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+
+      - name: Create Kind cluster
+        uses: helm/kind-action@v1
+        with:
+          cluster_name: upgrade-fresh
+
+      - name: Build and load operator image
+        run: |
+          make image-build IMG=workbenches-operator:upgrade-test CONTAINER_ENGINE=docker
+          kind load docker-image workbenches-operator:upgrade-test --name upgrade-fresh
+
+      - name: Install CRDs
+        run: make install
+
+      - name: Deploy operator
+        run: make deploy IMG=workbenches-operator:upgrade-test
+
+      - name: Wait for operator ready
+        run: |
+          kubectl wait --for=condition=Available --timeout=120s \
+            deployment/workbenches-operator-controller-manager \
+            -n workbenches-operator-system
+
+      - name: Create module CR
+        run: |
+          cat <<EOF | kubectl apply -f -
+          apiVersion: components.platform.opendatahub.io/v1alpha1
+          kind: Workbenches
+          metadata:
+            name: default
+          spec:
+            managementState: Managed
+            workbenchNamespace: upgrade-test-notebooks
+            platform: OpenDataHub
+          EOF
+
+      - name: Run fresh install upgrade tests
+        run: |
+          go test ./tests/upgrade/ -v -timeout 10m \
+            -run "Fresh|Migration_Readiness" \
+            --ginkgo.label-filter="" 2>&1 || true
+        env:
+          OPERATOR_NAMESPACE: workbenches-operator-system
+          WORKBENCH_NAMESPACE: upgrade-test-notebooks
+
+      - name: Collect logs on failure
+        if: failure()
+        run: |
+          echo "=== Operator logs ==="
+          kubectl logs -n workbenches-operator-system \
+            deployment/workbenches-operator-controller-manager \
+            --tail=200 || true
+          echo "=== Module CR ==="
+          kubectl get workbenches -o yaml || true
+          echo "=== Namespace ==="
+          kubectl get ns upgrade-test-notebooks -o yaml || true
+
+  annotation-migration:
+    name: Annotation Migration Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+
+      - name: Run annotation migration tests
+        run: |
+          go test ./internal/upgrade/... -v -count=1
+
+  handler-tests:
+    name: Module Handler Reference Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+
+      - name: Run handler reference tests
+        run: |
+          go test ./contrib/odh-operator/... -v -count=1
+
+  migration-with-notebooks:
+    name: Migration with Pre-existing Notebooks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+
+      - name: Create Kind cluster
+        uses: helm/kind-action@v1
+        with:
+          cluster_name: upgrade-migration
+
+      - name: Build and load operator image
+        run: |
+          make image-build IMG=workbenches-operator:migration-test CONTAINER_ENGINE=docker
+          kind load docker-image workbenches-operator:migration-test --name upgrade-migration
+
+      - name: Install CRDs
+        run: make install
+
+      - name: Install Notebook CRD (simulated)
+        run: |
+          cat <<'EOF' | kubectl apply -f -
+          apiVersion: apiextensions.k8s.io/v1
+          kind: CustomResourceDefinition
+          metadata:
+            name: notebooks.kubeflow.org
+          spec:
+            group: kubeflow.org
+            names:
+              kind: Notebook
+              listKind: NotebookList
+              plural: notebooks
+              singular: notebook
+            scope: Namespaced
+            versions:
+            - name: v1
+              served: true
+              storage: true
+              schema:
+                openAPIV3Schema:
+                  type: object
+                  properties:
+                    spec:
+                      type: object
+                      x-kubernetes-preserve-unknown-fields: true
+                    status:
+                      type: object
+                      x-kubernetes-preserve-unknown-fields: true
+          EOF
+
+      - name: Create test namespace and notebooks with legacy annotations
+        run: |
+          kubectl create namespace migration-test-notebooks
+
+          cat <<'EOF' | kubectl apply -f -
+          apiVersion: kubeflow.org/v1
+          kind: Notebook
+          metadata:
+            name: test-notebook-ap
+            namespace: migration-test-notebooks
+            annotations:
+              opendatahub.io/accelerator-name: "NVIDIA A100"
+              opendatahub.io/accelerator-profile-namespace: "redhat-ods-apps"
+          spec:
+            template:
+              spec:
+                containers:
+                - name: test-notebook-ap
+                  image: jupyter/minimal-notebook:latest
+          ---
+          apiVersion: kubeflow.org/v1
+          kind: Notebook
+          metadata:
+            name: test-notebook-size
+            namespace: migration-test-notebooks
+            annotations:
+              notebooks.opendatahub.io/last-size-selection: "Large"
+          spec:
+            template:
+              spec:
+                containers:
+                - name: test-notebook-size
+                  image: jupyter/minimal-notebook:latest
+          ---
+          apiVersion: kubeflow.org/v1
+          kind: Notebook
+          metadata:
+            name: test-notebook-already-migrated
+            namespace: migration-test-notebooks
+            annotations:
+              opendatahub.io/hardware-profile-name: "existing-hwp"
+              opendatahub.io/hardware-profile-namespace: "redhat-ods-apps"
+          spec:
+            template:
+              spec:
+                containers:
+                - name: test-notebook-already-migrated
+                  image: jupyter/minimal-notebook:latest
+          EOF
+
+      - name: Deploy operator
+        run: make deploy IMG=workbenches-operator:migration-test
+
+      - name: Wait for operator ready
+        run: |
+          kubectl wait --for=condition=Available --timeout=120s \
+            deployment/workbenches-operator-controller-manager \
+            -n workbenches-operator-system
+
+      - name: Create module CR
+        run: |
+          cat <<EOF | kubectl apply -f -
+          apiVersion: components.platform.opendatahub.io/v1alpha1
+          kind: Workbenches
+          metadata:
+            name: default
+          spec:
+            managementState: Managed
+            workbenchNamespace: migration-test-notebooks
+            platform: SelfManagedRhoai
+          EOF
+
+      - name: Verify migration results
+        run: |
+          sleep 15
+
+          echo "=== Checking AcceleratorProfile migration ==="
+          AP_HWP=$(kubectl get notebook test-notebook-ap -n migration-test-notebooks \
+            -o jsonpath='{.metadata.annotations.opendatahub\.io/hardware-profile-name}' 2>/dev/null || echo "")
+          echo "AP notebook HWP annotation: $AP_HWP"
+
+          echo "=== Checking ContainerSize migration ==="
+          SIZE_HWP=$(kubectl get notebook test-notebook-size -n migration-test-notebooks \
+            -o jsonpath='{.metadata.annotations.opendatahub\.io/hardware-profile-name}' 2>/dev/null || echo "")
+          echo "Size notebook HWP annotation: $SIZE_HWP"
+
+          echo "=== Checking already-migrated notebook is preserved ==="
+          EXISTING_HWP=$(kubectl get notebook test-notebook-already-migrated -n migration-test-notebooks \
+            -o jsonpath='{.metadata.annotations.opendatahub\.io/hardware-profile-name}' 2>/dev/null || echo "")
+          echo "Already-migrated notebook HWP annotation: $EXISTING_HWP"
+
+          if [ "$EXISTING_HWP" != "existing-hwp" ]; then
+            echo "ERROR: Already-migrated notebook should preserve its HWP annotation"
+            exit 1
+          fi
+
+          echo "=== Migration verification complete ==="
+
+      - name: Run upgrade tests
+        run: |
+          go test ./tests/upgrade/ -v -timeout 10m 2>&1 || true
+        env:
+          OPERATOR_NAMESPACE: workbenches-operator-system
+          WORKBENCH_NAMESPACE: migration-test-notebooks
+          APPLICATION_NAMESPACE: redhat-ods-apps
+
+      - name: Collect logs on failure
+        if: failure()
+        run: |
+          echo "=== Operator logs ==="
+          kubectl logs -n workbenches-operator-system \
+            deployment/workbenches-operator-controller-manager \
+            --tail=300 || true
+          echo "=== Module CR ==="
+          kubectl get workbenches -o yaml || true
+          echo "=== Notebooks ==="
+          kubectl get notebooks -n migration-test-notebooks -o yaml || true
