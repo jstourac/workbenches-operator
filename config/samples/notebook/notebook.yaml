@@ -1,0 +1,107 @@
+apiVersion: kubeflow.org/v1beta1
+kind: Notebook
+metadata:
+  annotations:
+    opendatahub.io/image-display-name: Jupyter | Minimal | CPU | Python 3.12
+    openshift.io/description: ""
+    openshift.io/display-name: test
+    notebooks.opendatahub.io/inject-auth: "true"
+  name: test
+  namespace: test-notebook
+  labels:
+    app: test
+    opendatahub.io/dashboard: "true"
+    opendatahub.io/odh-managed: "true"
+    opendatahub.io/user: htpasswd-2dcluster-2dadmin-2duser
+spec:
+  template:
+    spec:
+      containers:
+        - name: test
+          image: "image-registry.openshift-image-registry.svc:5000/opendatahub/jupyter-minimal-notebook:3.4"
+          imagePullPolicy: Always
+          resources:
+            limits:
+              cpu: "2"
+              memory: 4Gi
+            requests:
+              cpu: "2"
+              memory: 4Gi
+          ports:
+            - containerPort: 8888
+              name: notebook-port
+              protocol: TCP
+          env:
+            - name: NOTEBOOK_ARGS
+              value: |-
+                --ServerApp.port=8888
+                --ServerApp.token=''
+                --ServerApp.password=''
+                --ServerApp.base_url=/notebook/test-notebook/test
+                --ServerApp.quit_button=False
+            - name: JUPYTER_IMAGE
+              value: "image-registry.openshift-image-registry.svc:5000/opendatahub/jupyter-minimal-notebook:3.4"
+            - name: PIP_CERT
+              value: /etc/pki/tls/custom-certs/ca-bundle.crt
+            - name: REQUESTS_CA_BUNDLE
+              value: /etc/pki/tls/custom-certs/ca-bundle.crt
+            - name: SSL_CERT_FILE
+              value: /etc/pki/tls/custom-certs/ca-bundle.crt
+            - name: PIPELINES_SSL_SA_CERTS
+              value: /etc/pki/tls/custom-certs/ca-bundle.crt
+            - name: KF_PIPELINES_SSL_SA_CERTS
+              value: /etc/pki/tls/custom-certs/ca-bundle.crt
+            - name: GIT_SSL_CAINFO
+              value: /etc/pki/tls/custom-certs/ca-bundle.crt
+          readinessProbe:
+            failureThreshold: 3
+            httpGet:
+              path: /notebook/test-notebook/test/api
+              port: notebook-port
+              scheme: HTTP
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            successThreshold: 1
+            timeoutSeconds: 1
+          livenessProbe:
+            failureThreshold: 3
+            httpGet:
+              path: /notebook/test-notebook/test/api
+              port: notebook-port
+              scheme: HTTP
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            successThreshold: 1
+            timeoutSeconds: 1
+          volumeMounts:
+            - mountPath: /opt/app-root/src/
+              name: test-storage
+            - mountPath: /dev/shm
+              name: shm
+            - mountPath: /etc/pki/tls/custom-certs/ca-bundle.crt
+              name: trusted-ca
+              readOnly: true
+              subPath: ca-bundle.crt
+            - mountPath: /opt/app-root/pipeline-runtimes/
+              name: runtime-images
+          workingDir: /opt/app-root/src
+      enableServiceLinks: false
+      serviceAccountName: test
+      volumes:
+        - name: test-storage
+          persistentVolumeClaim:
+            claimName: test-storage
+        - name: shm
+          emptyDir:
+            medium: Memory
+        - name: trusted-ca
+          configMap:
+            name: workbench-trusted-ca-bundle
+            optional: true
+            items:
+              - key: ca-bundle.crt
+                path: ca-bundle.crt
+        - name: runtime-images
+          configMap:
+            name: pipeline-runtime-images
+            optional: true
