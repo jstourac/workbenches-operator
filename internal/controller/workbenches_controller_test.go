@@ -190,7 +190,7 @@ var _ = Describe("Workbenches Controller", func() {
 			Expect(ns.Labels).To(HaveKeyWithValue("opendatahub.io/generated-namespace", "true"))
 		})
 
-		It("Should resolve workbench namespace from spec for SelfManagedRhoai platform", func() {
+		It("Should set MLflow and gateway params from spec", func() {
 			nsName := "test-ns-params"
 			wb := &componentsv1alpha1.Workbenches{
 				ObjectMeta: metav1.ObjectMeta{Name: componentsv1alpha1.WorkbenchesInstanceName},
