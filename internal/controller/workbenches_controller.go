@@ -361,6 +361,9 @@ func (r *WorkbenchesReconciler) setErrorStatus(
 	reason string,
 	reconcileErr error,
 ) (ctrl.Result, error) {
+	l := log.FromContext(ctx)
+	l.Error(reconcileErr, "reconciliation failed, will retry", "reason", reason)
+
 	meta.SetStatusCondition(&wb.Status.Conditions, metav1.Condition{
 		Type:               conditionTypeReady,
 		Status:             metav1.ConditionFalse,
@@ -373,8 +376,8 @@ func (r *WorkbenchesReconciler) setErrorStatus(
 	wb.Status.ObservedGeneration = wb.Generation
 
 	if err := r.Status().Update(ctx, wb); err != nil {
-		log.FromContext(ctx).Error(err, "failed to update error status")
+		l.Error(err, "failed to update error status")
 	}
 
-	return ctrl.Result{}, reconcileErr
+	return ctrl.Result{RequeueAfter: requeueDelay}, nil
 }
