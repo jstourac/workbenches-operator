@@ -296,6 +296,7 @@ var cleanupGVKs = []schema.GroupVersionKind{
 	{Group: "", Version: "v1", Kind: "ServiceAccount"},
 	{Group: "rbac.authorization.k8s.io", Version: "v1", Kind: "Role"},
 	{Group: "rbac.authorization.k8s.io", Version: "v1", Kind: "RoleBinding"},
+	{Group: "image.openshift.io", Version: "v1", Kind: "ImageStream"},
 }
 
 // cleanupClusterGVKs lists the GroupVersionKinds of cluster-scoped resources to clean up.
@@ -304,7 +305,6 @@ var cleanupClusterGVKs = []schema.GroupVersionKind{
 	{Group: "rbac.authorization.k8s.io", Version: "v1", Kind: "ClusterRoleBinding"},
 	{Group: "admissionregistration.k8s.io", Version: "v1", Kind: "MutatingWebhookConfiguration"},
 	{Group: "admissionregistration.k8s.io", Version: "v1", Kind: "ValidatingWebhookConfiguration"},
-	{Group: "image.openshift.io", Version: "v1", Kind: "ImageStream"},
 	{Group: "apiextensions.k8s.io", Version: "v1", Kind: "CustomResourceDefinition"},
 }
 
