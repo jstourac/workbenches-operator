@@ -204,6 +204,10 @@ func writeParamsEnv(fSys filesys.FileSystem, kustomizeDir string, params map[str
 	}
 
 	for k, v := range params {
+		if strings.ContainsAny(k, "\n\r") || strings.ContainsAny(v, "\n\r") {
+			return fmt.Errorf("params key or value contains invalid control characters: %q", k)
+		}
+
 		if _, found := existing[k]; !found {
 			orderedKeys = append(orderedKeys, k)
 		}

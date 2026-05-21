@@ -185,6 +185,34 @@ func TestWriteParamsEnvEmpty(t *testing.T) {
 	}
 }
 
+func TestWriteParamsEnvRejectsControlCharacters(t *testing.T) {
+	fSys := filesys.MakeFsInMemory()
+	dir := testDir
+
+	if err := fSys.Mkdir(dir); err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name   string
+		params map[string]string
+	}{
+		{"newline in value", map[string]string{"key": "val\nMALICIOUS=injected"}},
+		{"carriage return in value", map[string]string{"key": "val\rMALICIOUS=injected"}},
+		{"newline in key", map[string]string{"bad\nkey": "value"}},
+		{"carriage return in key", map[string]string{"bad\rkey": "value"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := writeParamsEnv(fSys, dir, tt.params)
+			if err == nil {
+				t.Error("expected error for params containing control characters, got nil")
+			}
+		})
+	}
+}
+
 func TestSetComponentLabels(t *testing.T) {
 	t.Run("adds labels to unlabeled object", func(t *testing.T) {
 		obj := &unstructured.Unstructured{}
@@ -699,6 +727,7 @@ func TestCleanupManagedResources(t *testing.T) {
 			Namespace: namespace,
 			Labels: map[string]string{
 				metadata.ComponentLabelKey: metadata.LabelTrue,
+				metadata.PartOfLabelKey:    metadata.ComponentLabelValue,
 			},
 		},
 		Spec: appsv1.DeploymentSpec{
@@ -734,6 +763,7 @@ func TestCleanupManagedResources(t *testing.T) {
 			Namespace: namespace,
 			Labels: map[string]string{
 				metadata.ComponentLabelKey: metadata.LabelTrue,
+				metadata.PartOfLabelKey:    metadata.ComponentLabelValue,
 			},
 		},
 		Spec: corev1.ServiceSpec{
