@@ -146,6 +146,10 @@ func (r *WorkbenchesReconciler) reconcileRemoved(ctx context.Context, wb *compon
 func (r *WorkbenchesReconciler) reconcileManaged(ctx context.Context, wb *componentsv1alpha1.Workbenches) (ctrl.Result, error) {
 	l := log.FromContext(ctx)
 
+	if err := validateSpec(wb.Spec); err != nil {
+		return r.setErrorStatus(ctx, wb, "InvalidSpec", err)
+	}
+
 	if err := r.configureDependencies(ctx, wb); err != nil {
 		return r.setErrorStatus(ctx, wb, "ConfigureDependenciesFailed", err)
 	}
@@ -282,6 +286,15 @@ func (r *WorkbenchesReconciler) configureDependencies(ctx context.Context, wb *c
 		if updateErr := r.Update(ctx, ns); updateErr != nil {
 			return fmt.Errorf("failed to update namespace %s labels: %w", nsName, updateErr)
 		}
+	}
+
+	return nil
+}
+
+func validateSpec(spec componentsv1alpha1.WorkbenchesSpec) error {
+	if spec.Platform != "" && !platform.IsValid(spec.Platform) {
+		return fmt.Errorf("unsupported platform %q, must be one of: %s, %s",
+			spec.Platform, platform.OpenDataHub, platform.SelfManagedRhoai)
 	}
 
 	return nil
