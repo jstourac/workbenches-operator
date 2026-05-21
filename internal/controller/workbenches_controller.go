@@ -69,9 +69,9 @@ type WorkbenchesReconciler struct {
 // +kubebuilder:rbac:groups="",resources=namespaces,verbs=get;list;watch;create;update;patch
 // +kubebuilder:rbac:groups="",resources=configmaps;services;serviceaccounts,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
-// escalate and bind are required because upstream manifests include ClusterRoles with aggregationRules
-// and ClusterRoleBindings referencing roles beyond this SA's own permissions.
-// +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=roles;rolebindings;clusterroles;clusterrolebindings,verbs=get;list;watch;create;update;patch;delete;escalate;bind
+// escalate and bind for RBAC resources are granted in a separate hand-maintained ClusterRole
+// (config/rbac/rbac_escalate_role.yaml) scoped to specific resourceNames from upstream manifests.
+// +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=roles;rolebindings;clusterroles;clusterrolebindings,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=apiextensions.k8s.io,resources=customresourcedefinitions,verbs=get;list;watch;create;update;patch;delete
 // Write verbs are required because the operator creates/patches webhook configs from upstream manifests via SSA
 // and deletes them during component removal.
