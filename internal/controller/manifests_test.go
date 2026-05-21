@@ -201,6 +201,7 @@ func TestWriteParamsEnvRejectsControlCharacters(t *testing.T) {
 		{"carriage return in value", map[string]string{"key": "val\rMALICIOUS=injected"}},
 		{"newline in key", map[string]string{"bad\nkey": "value"}},
 		{"carriage return in key", map[string]string{"bad\rkey": "value"}},
+		{"equals in key", map[string]string{"bad=key": "value"}},
 	}
 
 	for _, tt := range tests {
@@ -542,6 +543,10 @@ resources:
 }
 
 func TestRenderKustomizeFromReadOnlySource(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("read-only directory semantics do not apply to root")
+	}
+
 	srcDir := t.TempDir()
 
 	deployYAML := `apiVersion: apps/v1

@@ -41,6 +41,11 @@ fetch_manifests() {
 
     IFS=':' read -r org repo branch_sha source_path <<< "${spec}"
 
+    if [[ -z "${org}" || -z "${repo}" || -z "${branch_sha}" || -z "${source_path}" ]]; then
+        echo "ERROR: invalid spec for ${target}: '${spec}' (expected org:repo:branch[@sha]:source_path)"
+        exit 1
+    fi
+
     local branch="${branch_sha}"
     local sha=""
     if [[ "${branch_sha}" == *"@"* ]]; then

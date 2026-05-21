@@ -127,6 +127,10 @@ func copyDir(src, dst string) error {
 			return os.MkdirAll(target, 0o700)
 		}
 
+		if d.Type()&os.ModeSymlink != 0 {
+			return fmt.Errorf("refusing to copy symlink %s", path)
+		}
+
 		data, err := os.ReadFile(path) //nolint:gosec // reading baked-in manifests from a known path
 		if err != nil {
 			return fmt.Errorf("failed to read %s: %w", path, err)
@@ -204,8 +208,12 @@ func writeParamsEnv(fSys filesys.FileSystem, kustomizeDir string, params map[str
 	}
 
 	for k, v := range params {
-		if strings.ContainsAny(k, "\n\r") || strings.ContainsAny(v, "\n\r") {
-			return fmt.Errorf("params key or value contains invalid control characters: %q", k)
+		if strings.ContainsAny(k, "\n\r=") {
+			return fmt.Errorf("params key contains invalid characters: %q", k)
+		}
+
+		if strings.ContainsAny(v, "\n\r") {
+			return fmt.Errorf("params value for key %q contains invalid control characters", k)
 		}
 
 		if _, found := existing[k]; !found {
