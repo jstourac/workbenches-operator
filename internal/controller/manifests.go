@@ -309,7 +309,10 @@ func (r *WorkbenchesReconciler) cleanupManagedResources(ctx context.Context, nam
 	l := log.FromContext(ctx)
 	l.Info("cleaning up managed resources", "namespace", namespace)
 
-	componentLabel := client.MatchingLabels{metadata.ComponentLabelKey: metadata.LabelTrue}
+	componentLabel := client.MatchingLabels{
+		metadata.ComponentLabelKey: metadata.LabelTrue,
+		metadata.PartOfLabelKey:    metadata.ComponentLabelValue,
+	}
 
 	for _, gvk := range cleanupGVKs {
 		list := &unstructured.UnstructuredList{}
