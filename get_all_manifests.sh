@@ -59,11 +59,11 @@ fetch_manifests() {
     echo "Fetching ${target} from ${repo_url} (branch: ${branch}, sha: ${sha:-HEAD})"
 
     if [[ ! -d "${clone_dir}" ]]; then
-        git clone --depth 1 --branch "${branch}" "${repo_url}" "${clone_dir}" 2>/dev/null
+        git clone --depth 1 --branch "${branch}" "${repo_url}" "${clone_dir}"
     fi
 
     if [[ -n "${sha}" ]]; then
-        (cd "${clone_dir}" && git fetch --depth 1 origin "${sha}" && git checkout "${sha}") 2>/dev/null
+        (cd "${clone_dir}" && git fetch --depth 1 origin "${sha}" && git checkout "${sha}")
     fi
 
     local resolved
