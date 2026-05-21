@@ -20,6 +20,7 @@ package main
 import (
 	"crypto/tls"
 	"flag"
+	"fmt"
 	"os"
 
 	"k8s.io/apimachinery/pkg/runtime"
@@ -77,8 +78,14 @@ func main() {
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 
-	if info, err := os.Stat(manifestsBasePath); err != nil || !info.IsDir() {
-		setupLog.Error(err, "invalid manifests-base-path: must be an existing directory", "path", manifestsBasePath)
+	info, err := os.Stat(manifestsBasePath)
+	if err != nil {
+		setupLog.Error(err, "invalid manifests-base-path", "path", manifestsBasePath)
+		os.Exit(1)
+	}
+
+	if !info.IsDir() {
+		setupLog.Error(fmt.Errorf("path exists but is not a directory"), "invalid manifests-base-path", "path", manifestsBasePath)
 		os.Exit(1)
 	}
 
