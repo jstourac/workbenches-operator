@@ -6,6 +6,13 @@ This guide outlines the steps to upgrade the Go version and dependencies in the 
 
 Upgrading the Go version should be done in a separate PR to isolate the changes and make review easier.
 
+> [!NOTE]
+> **Patch versions are bumped automatically.** The `go-directive-updater` workflow
+> (`.github/workflows/go-directive-updater.yaml`) runs weekly and opens a PR to
+> bump the `go` directive in `go.mod` to the latest patch release, provided a
+> matching `ubi9/go-toolset` image tag exists. The steps below are for **minor or
+> major** version upgrades that require manual Dockerfile and CI changes.
+
 > [!IMPORTANT]
 > Images are built in the [ubi9/go-toolset](https://catalog.redhat.com/software/containers/ubi9/go-toolset/61e5c00b4ec9945c18787690) container.
 > It contains a customized FIPS-compatible version of Go, that however lags behind the latest upstream Go version.
