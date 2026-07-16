@@ -26,7 +26,235 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	componentsv1alpha1 "github.com/opendatahub-io/workbenches-operator/api/v1alpha1"
+	"github.com/opendatahub-io/workbenches-operator/internal/platform"
 )
+
+func TestReadDesiredDistribution(t *testing.T) {
+	t.Parallel()
+
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme() error = %v", err)
+	}
+
+	cm := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      ConfigMapName,
+			Namespace: "opendatahub",
+		},
+		Data: map[string]string{
+			DistributionNameKey:    " OpenDataHub ",
+			DistributionVersionKey: " 3.5.1 ",
+		},
+	}
+
+	cli := fake.NewClientBuilder().WithScheme(scheme).WithObjects(cm).Build()
+
+	got, err := ReadDesiredDistribution(context.Background(), cli, "opendatahub")
+	if err != nil {
+		t.Fatalf("ReadDesiredDistribution() error = %v", err)
+	}
+
+	if got.Name != "OpenDataHub" || got.Version != "3.5.1" {
+		t.Fatalf("ReadDesiredDistribution() = %#v, want OpenDataHub/3.5.1", got)
+	}
+}
+
+func TestReadDesiredDistributionMissingConfigMap(t *testing.T) {
+	t.Parallel()
+
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme() error = %v", err)
+	}
+
+	cli := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+	got, err := ReadDesiredDistribution(context.Background(), cli, "opendatahub")
+	if err != nil {
+		t.Fatalf("ReadDesiredDistribution() error = %v", err)
+	}
+
+	if !IsDistributionEmpty(got) {
+		t.Fatalf("ReadDesiredDistribution() = %#v, want empty", got)
+	}
+}
+
+func TestReadDesiredDistributionPartialKeys(t *testing.T) {
+	t.Parallel()
+
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme() error = %v", err)
+	}
+
+	cm := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      ConfigMapName,
+			Namespace: "opendatahub",
+		},
+		Data: map[string]string{
+			DistributionVersionKey: "3.5.1",
+		},
+	}
+
+	cli := fake.NewClientBuilder().WithScheme(scheme).WithObjects(cm).Build()
+
+	got, err := ReadDesiredDistribution(context.Background(), cli, "opendatahub")
+	if err != nil {
+		t.Fatalf("ReadDesiredDistribution() error = %v", err)
+	}
+
+	if got.Name != "" || got.Version != "3.5.1" {
+		t.Fatalf("ReadDesiredDistribution() = %#v, want empty name and version 3.5.1", got)
+	}
+}
+
+func TestDistributionAligned(t *testing.T) {
+	t.Parallel()
+
+	desired := componentsv1alpha1.Distribution{Name: "OpenDataHub", Version: "3.5.1"}
+
+	if !DistributionAligned(desired, desired) {
+		t.Fatal("DistributionAligned() = false, want true for matching values")
+	}
+
+	if DistributionAligned(desired, componentsv1alpha1.Distribution{}) {
+		t.Fatal("DistributionAligned() = true, want false for empty current")
+	}
+
+	if DistributionAligned(desired, componentsv1alpha1.Distribution{Name: "OpenDataHub", Version: "3.4.0"}) {
+		t.Fatal("DistributionAligned() = true, want false for version mismatch")
+	}
+}
+
+func TestStandaloneDistribution(t *testing.T) {
+	t.Parallel()
+
+	got := StandaloneDistribution("")
+	if got.Name != DistributionNameStandalone || got.Version != "0.0.0" {
+		t.Fatalf("StandaloneDistribution(\"\") = %#v, want Standalone/0.0.0", got)
+	}
+
+	got = StandaloneDistribution("1.2.3")
+	if got.Name != DistributionNameStandalone || got.Version != "1.2.3" {
+		t.Fatalf("StandaloneDistribution(\"1.2.3\") = %#v", got)
+	}
+}
+
+func TestResolveDesiredDistribution(t *testing.T) {
+	t.Parallel()
+
+	standalone := ResolveDesiredDistribution(componentsv1alpha1.Distribution{}, "", "1.0.0")
+	if standalone.Name != DistributionNameStandalone || standalone.Version != "1.0.0" {
+		t.Fatalf("ResolveDesiredDistribution() standalone = %#v", standalone)
+	}
+
+	fromSpec := ResolveDesiredDistribution(
+		componentsv1alpha1.Distribution{Version: "3.5.1"},
+		platform.SelfManagedRhoai,
+		"1.0.0",
+	)
+	if fromSpec.Name != DistributionNameSelfManagedRHOAI || fromSpec.Version != "3.5.1" {
+		t.Fatalf("ResolveDesiredDistribution() from spec = %#v", fromSpec)
+	}
+
+	versionOnly := ResolveDesiredDistribution(
+		componentsv1alpha1.Distribution{Version: "3.5.1"},
+		"",
+		"",
+	)
+	if versionOnly.Name != DistributionNameStandalone || versionOnly.Version != "3.5.1" {
+		t.Fatalf("ResolveDesiredDistribution() version-only = %#v", versionOnly)
+	}
+}
+
+func TestReadDesiredDistributionEmptyNamespace(t *testing.T) {
+	t.Parallel()
+
+	got, err := ReadDesiredDistribution(context.Background(), fake.NewClientBuilder().Build(), "")
+	if err != nil {
+		t.Fatalf("ReadDesiredDistribution() error = %v", err)
+	}
+
+	if !IsDistributionEmpty(got) {
+		t.Fatalf("ReadDesiredDistribution() = %#v, want empty", got)
+	}
+}
+
+func TestReadPlatformVersionEmptyNamespace(t *testing.T) {
+	t.Parallel()
+
+	got, err := ReadPlatformVersion(context.Background(), fake.NewClientBuilder().Build(), "")
+	if err != nil {
+		t.Fatalf("ReadPlatformVersion() error = %v", err)
+	}
+
+	if got != "" {
+		t.Fatalf("ReadPlatformVersion() = %q, want empty", got)
+	}
+}
+
+func TestGetPlatformRelease(t *testing.T) {
+	t.Parallel()
+
+	releases := []componentsv1alpha1.ComponentRelease{
+		{Name: "component-a", Version: "1.0.0"},
+		{Name: ReleaseName, Version: "2.20.0"},
+	}
+
+	got := GetPlatformRelease(releases)
+	if got.Name != ReleaseName || got.Version != "2.20.0" {
+		t.Fatalf("GetPlatformRelease() = %#v", got)
+	}
+
+	if release := GetPlatformRelease(nil); release.Name != "" || release.Version != "" {
+		t.Fatalf("GetPlatformRelease(nil) = %#v, want empty", release)
+	}
+}
+
+func TestSetPlatformRelease(t *testing.T) {
+	t.Parallel()
+
+	releases := []componentsv1alpha1.ComponentRelease{
+		{Name: "component-a", Version: "1.0.0"},
+	}
+	SetPlatformRelease(&releases, "2.20.0")
+
+	if len(releases) != 2 || releases[1].Name != ReleaseName || releases[1].Version != "2.20.0" {
+		t.Fatalf("SetPlatformRelease() append = %#v", releases)
+	}
+
+	SetPlatformRelease(&releases, "2.21.0")
+	if releases[1].Version != "2.21.0" {
+		t.Fatalf("SetPlatformRelease() replace = %#v", releases)
+	}
+
+	unchanged := []componentsv1alpha1.ComponentRelease{{Name: "component-a", Version: "1.0.0"}}
+	SetPlatformRelease(&unchanged, "  ")
+	if len(unchanged) != 1 {
+		t.Fatalf("SetPlatformRelease() empty version = %#v", unchanged)
+	}
+}
+
+func TestMergeComponentReleases(t *testing.T) {
+	t.Parallel()
+
+	componentReleases := []componentsv1alpha1.ComponentRelease{
+		{Name: "component-a", Version: "1.0.0"},
+		{Name: ReleaseName, Version: "stale"},
+	}
+	platformRelease := componentsv1alpha1.ComponentRelease{Name: ReleaseName, Version: "2.20.0"}
+
+	got := MergeComponentReleases(componentReleases, platformRelease)
+	if len(got) != 2 || got[0].Name != "component-a" || got[1].Version != "2.20.0" {
+		t.Fatalf("MergeComponentReleases() = %#v", got)
+	}
+
+	if merged := MergeComponentReleases(componentReleases, componentsv1alpha1.ComponentRelease{}); len(merged) != 1 {
+		t.Fatalf("MergeComponentReleases() without platform = %#v", merged)
+	}
+}
 
 func TestReadPlatformVersion(t *testing.T) {
 	t.Parallel()
@@ -58,46 +286,30 @@ func TestReadPlatformVersion(t *testing.T) {
 	}
 }
 
-func TestReadPlatformVersionMissingConfigMap(t *testing.T) {
-	t.Parallel()
-
-	scheme := runtime.NewScheme()
-	if err := corev1.AddToScheme(scheme); err != nil {
-		t.Fatalf("AddToScheme() error = %v", err)
-	}
-
-	cli := fake.NewClientBuilder().WithScheme(scheme).Build()
-
-	got, err := ReadPlatformVersion(context.Background(), cli, "opendatahub")
-	if err != nil {
-		t.Fatalf("ReadPlatformVersion() error = %v", err)
-	}
-
-	if got != "" {
-		t.Fatalf("ReadPlatformVersion() = %q, want empty", got)
-	}
-}
-
-func TestPlatformReleaseHelpers(t *testing.T) {
+func TestHandshakeComplete(t *testing.T) {
 	t.Parallel()
 
 	releases := []componentsv1alpha1.ComponentRelease{
-		{Name: "Kubeflow Notebook Controller", Version: "1.10.0"},
+		{Name: ReleaseName, Version: "2.20.0"},
 	}
-
-	SetPlatformRelease(&releases, "2.20.0")
 
 	if !HandshakeComplete("2.20.0", releases) {
 		t.Fatal("HandshakeComplete() = false, want true")
 	}
 
-	merged := MergeComponentReleases(releases, GetPlatformRelease(releases))
-	if len(merged) != 2 {
-		t.Fatalf("len(merged) = %d, want 2", len(merged))
+	if HandshakeComplete("2.21.0", releases) {
+		t.Fatal("HandshakeComplete() = true, want false for version mismatch")
+	}
+}
+
+func TestHandshakeRequired(t *testing.T) {
+	t.Parallel()
+
+	if HandshakeRequired(StandaloneDistribution("1.0.0")) {
+		t.Fatal("HandshakeRequired() = true, want false for standalone")
 	}
 
-	SetPlatformRelease(&releases, "2.21.0")
-	if HandshakeComplete("2.20.0", releases) {
-		t.Fatal("HandshakeComplete() = true before handshake advanced")
+	if !HandshakeRequired(componentsv1alpha1.Distribution{Name: "OpenDataHub", Version: "3.5.1"}) {
+		t.Fatal("HandshakeRequired() = false, want true for managed distribution")
 	}
 }
