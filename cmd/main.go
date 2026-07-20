@@ -23,10 +23,13 @@ import (
 	"flag"
 	"os"
 
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
@@ -76,7 +79,7 @@ func main() {
 		"Base path for component manifests.")
 
 	opts := zap.Options{
-		Development: true,
+		Development: false,
 	}
 	opts.BindFlags(flag.CommandLine)
 	flag.Parse()
@@ -117,22 +120,37 @@ func main() {
 		TLSOpts: tlsOpts,
 	})
 
-	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
+	applicationsNamespace := os.Getenv("APPLICATIONS_NAMESPACE")
+	if applicationsNamespace == "" {
+		applicationsNamespace = platform.DefaultNotebooksNamespaceODH
+	}
+
+	mgrOptions := ctrl.Options{
 		Scheme:                 scheme,
 		Metrics:                metricsServerOptions,
 		WebhookServer:          webhookServer,
 		HealthProbeBindAddress: probeAddr,
 		LeaderElection:         enableLeaderElection,
 		LeaderElectionID:       "workbenches-operator.platform.opendatahub.io",
-	})
+	}
+	// Partially addresses https://github.com/opendatahub-io/workbenches-operator/issues/43:
+	// scope ConfigMap informer cache to APPLICATIONS_NAMESPACE. Deployment watches remain
+	// cluster-scoped because workbench Deployments live in the workbench namespace, which
+	// can differ from APPLICATIONS_NAMESPACE.
+	mgrOptions.Cache = cache.Options{
+		ByObject: map[client.Object]cache.ByObject{
+			&corev1.ConfigMap{}: {
+				Namespaces: map[string]cache.Config{
+					applicationsNamespace: {},
+				},
+			},
+		},
+	}
+
+	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), mgrOptions)
 	if err != nil {
 		setupLog.Error(err, "unable to start manager")
 		os.Exit(1)
-	}
-
-	applicationsNamespace := os.Getenv("APPLICATIONS_NAMESPACE")
-	if applicationsNamespace == "" {
-		applicationsNamespace = platform.DefaultNotebooksNamespaceODH
 	}
 
 	if err = (&controller.WorkbenchesReconciler{
