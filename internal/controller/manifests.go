@@ -25,11 +25,16 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/go-logr/logr"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	k8stypes "k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/wait"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -48,6 +53,16 @@ const (
 	fieldOwner     = "workbenches-operator"
 	kindDeployment = "Deployment"
 	kindService    = "Service"
+
+	// annotationSelectorRecreated marks a Deployment that was deleted and
+	// recreated due to an immutable spec.selector conflict. The value is the
+	// timestamp of the recreation. This prevents the operator from
+	// repeatedly tearing down the same Deployment across reconcile loops if
+	// the conflict persists for any reason.
+	annotationSelectorRecreated = "workbenches-operator/selector-recreated"
+
+	deletionPollInterval = 200 * time.Millisecond
+	deletionPollTimeout  = 30 * time.Second
 )
 
 // manifestGroupsForPlatform returns the kustomize root paths (relative to
@@ -318,6 +333,14 @@ func (r *WorkbenchesReconciler) applyObjects(
 			client.ForceOwnership,
 		)
 		if err != nil {
+			if isImmutableFieldError(err) && obj.GetKind() == kindDeployment {
+				if deleteErr := r.deleteAndReapply(ctx, l, obj); deleteErr != nil {
+					return deleteErr
+				}
+
+				continue
+			}
+
 			l.Error(err, "SSA patch failed",
 				"gvk", obj.GroupVersionKind(),
 				"name", obj.GetName(),
@@ -331,6 +354,104 @@ func (r *WorkbenchesReconciler) applyObjects(
 			"kind", obj.GetKind(),
 			"name", obj.GetName(),
 			"namespace", obj.GetNamespace())
+	}
+
+	return nil
+}
+
+// isImmutableFieldError returns true when a Kubernetes API error indicates that
+// a field update was rejected because the field is immutable (e.g. Deployment
+// spec.selector). ForceOwnership in SSA resolves field-manager conflicts but
+// cannot override API-level immutability.
+func isImmutableFieldError(err error) bool {
+	return apierrors.IsInvalid(err) && strings.Contains(err.Error(), "field is immutable")
+}
+
+// deleteAndReapply deletes an existing resource and re-applies it via SSA.
+// This handles immutable field changes (e.g. Deployment spec.selector) that
+// cannot be updated in-place. The old resource is deleted with background
+// propagation so its Pods are cleaned up. The function then polls until the
+// Deployment is fully removed before creating the replacement via SSA.
+//
+// A guard annotation (annotationSelectorRecreated) is set on the recreated
+// Deployment to prevent repeated delete-recreate cycles if the conflict
+// persists. Delete uses Preconditions (UID + ResourceVersion) to avoid
+// racing with concurrent modifications.
+func (r *WorkbenchesReconciler) deleteAndReapply(
+	ctx context.Context,
+	l logr.Logger,
+	obj *unstructured.Unstructured,
+) error {
+	l.Info("Deployment has immutable field conflict, deleting and recreating",
+		"name", obj.GetName(),
+		"namespace", obj.GetNamespace())
+
+	existing := &unstructured.Unstructured{}
+	existing.SetGroupVersionKind(obj.GroupVersionKind())
+
+	key := k8stypes.NamespacedName{Name: obj.GetName(), Namespace: obj.GetNamespace()}
+	if err := r.Get(ctx, key, existing); err != nil {
+		return fmt.Errorf("failed to get existing Deployment %s/%s for delete-recreate: %w",
+			obj.GetNamespace(), obj.GetName(), err)
+	}
+
+	if existing.GetAnnotations()[annotationSelectorRecreated] != "" {
+		return fmt.Errorf(
+			"deployment %s/%s was already recreated for an immutable selector conflict "+
+				"(annotation %s is set); refusing to delete again — manual intervention required",
+			obj.GetNamespace(), obj.GetName(), annotationSelectorRecreated)
+	}
+
+	uid := existing.GetUID()
+	rv := existing.GetResourceVersion()
+	propagation := metav1.DeletePropagationBackground
+
+	if err := r.Delete(ctx, existing,
+		&client.DeleteOptions{
+			Preconditions:     &metav1.Preconditions{UID: &uid, ResourceVersion: &rv},
+			PropagationPolicy: &propagation,
+		},
+	); err != nil {
+		return fmt.Errorf("failed to delete Deployment %s/%s for immutable field update: %w",
+			obj.GetNamespace(), obj.GetName(), err)
+	}
+
+	if err := wait.PollUntilContextTimeout(ctx, deletionPollInterval, deletionPollTimeout, true,
+		func(ctx context.Context) (bool, error) {
+			gone := &unstructured.Unstructured{}
+			gone.SetGroupVersionKind(obj.GroupVersionKind())
+			if getErr := r.Get(ctx, key, gone); apierrors.IsNotFound(getErr) {
+				return true, nil
+			} else if getErr != nil {
+				return false, getErr
+			}
+
+			return false, nil
+		},
+	); err != nil {
+		return fmt.Errorf("timed out waiting for Deployment %s/%s deletion before re-apply: %w",
+			obj.GetNamespace(), obj.GetName(), err)
+	}
+
+	l.Info("deleted existing Deployment, re-applying via SSA",
+		"name", obj.GetName(),
+		"namespace", obj.GetNamespace())
+
+	annotations := obj.GetAnnotations()
+	if annotations == nil {
+		annotations = map[string]string{}
+	}
+	annotations[annotationSelectorRecreated] = metav1.Now().UTC().Format(metav1.RFC3339Micro)
+	obj.SetAnnotations(annotations)
+
+	//nolint:staticcheck // client.Apply via Patch is the correct pattern for unstructured SSA
+	if err := r.Patch(ctx, obj,
+		client.Apply,
+		client.FieldOwner(fieldOwner),
+		client.ForceOwnership,
+	); err != nil {
+		return fmt.Errorf("failed to re-apply Deployment %s/%s after delete: %w",
+			obj.GetNamespace(), obj.GetName(), err)
 	}
 
 	return nil

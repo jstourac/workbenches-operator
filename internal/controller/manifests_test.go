@@ -29,11 +29,13 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	"k8s.io/apimachinery/pkg/util/validation/field"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -1720,4 +1722,279 @@ func TestPatchKustomizeNamespace(t *testing.T) {
 			t.Error("the injected payload should be safely contained within the namespace value")
 		}
 	})
+}
+
+func TestIsImmutableFieldError(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{
+			name: "nil error",
+			err:  nil,
+			want: false,
+		},
+		{
+			name: "generic error",
+			err:  errors.New("something went wrong"),
+			want: false,
+		},
+		{
+			name: "NotFound error",
+			err:  apierrors.NewNotFound(schema.GroupResource{Group: "apps", Resource: "deployments"}, "test"),
+			want: false,
+		},
+		{
+			name: "Invalid error without immutable message",
+			err: apierrors.NewInvalid(
+				schema.GroupKind{Group: "apps", Kind: "Deployment"},
+				"test",
+				nil,
+			),
+			want: false,
+		},
+		{
+			name: "Invalid error with immutable field message",
+			err: apierrors.NewInvalid(
+				schema.GroupKind{Group: "apps", Kind: "Deployment"},
+				"notebook-controller-deployment",
+				field.ErrorList{field.Invalid(
+					field.NewPath("spec", "selector"),
+					map[string]string{"app": "notebook-controller"},
+					"field is immutable",
+				)},
+			),
+			want: true,
+		},
+		{
+			name: "Conflict error",
+			err:  apierrors.NewConflict(schema.GroupResource{Group: "apps", Resource: "deployments"}, "test", errors.New("conflict")),
+			want: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := isImmutableFieldError(tc.err)
+			if got != tc.want {
+				t.Errorf("isImmutableFieldError() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestApplyObjectsDeletesAndRecreatesToHandleImmutableFieldError(t *testing.T) {
+	t.Parallel()
+
+	scheme := runtime.NewScheme()
+	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
+	utilruntime.Must(appsv1.AddToScheme(scheme))
+	utilruntime.Must(componentsv1alpha1.AddToScheme(scheme))
+
+	owner := &componentsv1alpha1.Workbenches{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: componentsv1alpha1.WorkbenchesInstanceName,
+			UID:  "owner-uid-456",
+		},
+	}
+
+	deployment := &unstructured.Unstructured{}
+	deployment.SetAPIVersion("apps/v1")
+	deployment.SetKind("Deployment")
+	deployment.SetName("notebook-controller-deployment")
+	deployment.SetNamespace("redhat-ods-applications")
+
+	immutableErr := apierrors.NewInvalid(
+		schema.GroupKind{Group: "apps", Kind: "Deployment"},
+		"notebook-controller-deployment",
+		field.ErrorList{field.Invalid(
+			field.NewPath("spec", "selector"),
+			map[string]string{"app": "notebook-controller"},
+			"field is immutable",
+		)},
+	)
+
+	patchCallCount := 0
+	var deleted bool
+	var reapplied bool
+
+	existingDeployment := &unstructured.Unstructured{}
+	existingDeployment.SetAPIVersion("apps/v1")
+	existingDeployment.SetKind("Deployment")
+	existingDeployment.SetName("notebook-controller-deployment")
+	existingDeployment.SetNamespace("redhat-ods-applications")
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(existingDeployment).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Patch: func(_ context.Context, _ client.WithWatch, obj client.Object, _ client.Patch, _ ...client.PatchOption) error {
+				patchCallCount++
+				if patchCallCount == 1 {
+					return immutableErr
+				}
+				reapplied = true
+
+				return nil
+			},
+			Delete: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+				if obj.GetName() == "notebook-controller-deployment" {
+					deleted = true
+				}
+
+				deleteOpts := &client.DeleteOptions{}
+				for _, o := range opts {
+					o.ApplyToDelete(deleteOpts)
+				}
+				if deleteOpts.Preconditions == nil || deleteOpts.Preconditions.UID == nil {
+					t.Error("expected Delete to include Preconditions with UID")
+				}
+				if deleteOpts.PropagationPolicy == nil {
+					t.Error("expected Delete to include PropagationPolicy")
+				}
+
+				return c.Delete(ctx, obj)
+			},
+		}).
+		Build()
+
+	reconciler := &WorkbenchesReconciler{
+		Client: fakeClient,
+		Scheme: scheme,
+	}
+
+	err := reconciler.applyObjects(context.Background(), owner, []*unstructured.Unstructured{deployment})
+	if err != nil {
+		t.Fatalf("applyObjects() should succeed after delete-recreate, got error: %v", err)
+	}
+
+	if !deleted {
+		t.Error("expected the existing Deployment to be deleted")
+	}
+
+	if !reapplied {
+		t.Error("expected the Deployment to be re-applied via SSA after deletion")
+	}
+
+	if patchCallCount != 2 {
+		t.Errorf("expected 2 Patch calls (initial fail + re-apply), got %d", patchCallCount)
+	}
+
+	ann := deployment.GetAnnotations()
+	if ann == nil || ann[annotationSelectorRecreated] == "" {
+		t.Error("expected the recreated Deployment to have the selector-recreated annotation")
+	}
+}
+
+func TestDeleteAndReapplyRefusesWhenAlreadyRecreated(t *testing.T) {
+	t.Parallel()
+
+	scheme := runtime.NewScheme()
+	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
+	utilruntime.Must(appsv1.AddToScheme(scheme))
+	utilruntime.Must(componentsv1alpha1.AddToScheme(scheme))
+
+	existingDeployment := &unstructured.Unstructured{}
+	existingDeployment.SetAPIVersion("apps/v1")
+	existingDeployment.SetKind("Deployment")
+	existingDeployment.SetName("notebook-controller-deployment")
+	existingDeployment.SetNamespace("redhat-ods-applications")
+	existingDeployment.SetAnnotations(map[string]string{
+		annotationSelectorRecreated: "2026-07-28T10:00:00.000000Z",
+	})
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(existingDeployment).
+		Build()
+
+	reconciler := &WorkbenchesReconciler{
+		Client: fakeClient,
+		Scheme: scheme,
+	}
+
+	desired := &unstructured.Unstructured{}
+	desired.SetAPIVersion("apps/v1")
+	desired.SetKind("Deployment")
+	desired.SetName("notebook-controller-deployment")
+	desired.SetNamespace("redhat-ods-applications")
+
+	err := reconciler.deleteAndReapply(context.Background(), logr.Discard(), desired)
+	if err == nil {
+		t.Fatal("deleteAndReapply() should return an error when the annotation guard is set")
+	}
+
+	if !strings.Contains(err.Error(), "already recreated") {
+		t.Errorf("expected 'already recreated' in error, got: %v", err)
+	}
+}
+
+func TestApplyObjectsDoesNotDeleteNonDeploymentOnImmutableError(t *testing.T) {
+	t.Parallel()
+
+	scheme := runtime.NewScheme()
+	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
+	utilruntime.Must(componentsv1alpha1.AddToScheme(scheme))
+
+	owner := &componentsv1alpha1.Workbenches{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: componentsv1alpha1.WorkbenchesInstanceName,
+			UID:  "owner-uid-789",
+		},
+	}
+
+	service := &unstructured.Unstructured{}
+	service.SetAPIVersion("v1")
+	service.SetKind("Service")
+	service.SetName("notebook-controller-service")
+	service.SetNamespace("redhat-ods-applications")
+
+	immutableErr := apierrors.NewInvalid(
+		schema.GroupKind{Group: "", Kind: "Service"},
+		"notebook-controller-service",
+		field.ErrorList{field.Invalid(
+			field.NewPath("spec", "clusterIP"),
+			"10.0.0.1",
+			"field is immutable",
+		)},
+	)
+
+	deleteCallCount := 0
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Patch: func(_ context.Context, _ client.WithWatch, _ client.Object, _ client.Patch, _ ...client.PatchOption) error {
+				return immutableErr
+			},
+			Delete: func(_ context.Context, _ client.WithWatch, _ client.Object, _ ...client.DeleteOption) error {
+				deleteCallCount++
+
+				return nil
+			},
+		}).
+		Build()
+
+	reconciler := &WorkbenchesReconciler{
+		Client: fakeClient,
+		Scheme: scheme,
+	}
+
+	err := reconciler.applyObjects(context.Background(), owner, []*unstructured.Unstructured{service})
+	if err == nil {
+		t.Fatal("applyObjects() should return an error for non-Deployment immutable field errors")
+	}
+
+	if !strings.Contains(err.Error(), "failed to apply") {
+		t.Errorf("expected 'failed to apply' in error, got: %v", err)
+	}
+
+	if deleteCallCount != 0 {
+		t.Errorf("expected no Delete calls for non-Deployment kinds, got %d", deleteCallCount)
+	}
 }
