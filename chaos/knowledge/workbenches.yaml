@@ -1,0 +1,99 @@
+operator:
+  name: workbenches-operator
+  namespace: opendatahub
+  repository: https://github.com/opendatahub-io/workbenches-operator
+
+components:
+  - name: workbenches-operator
+    controller: Workbenches
+    managedResources:
+      - apiVersion: apps/v1
+        kind: Deployment
+        name: workbenches-operator
+        namespace: workbenches-operator-system
+        labels:
+          app.opendatahub.io/workbenches: "true"
+          app.kubernetes.io/part-of: workbenches
+        expectedSpec:
+          replicas: 1
+      - apiVersion: v1
+        kind: ServiceAccount
+        name: workbenches-operator
+        namespace: workbenches-operator-system
+      - apiVersion: rbac.authorization.k8s.io/v1
+        kind: ClusterRole
+        name: workbenches-operator-manager-role
+      - apiVersion: rbac.authorization.k8s.io/v1
+        kind: ClusterRoleBinding
+        name: workbenches-operator-manager-rolebinding
+      - apiVersion: v1
+        kind: Service
+        name: workbenches-operator-webhook-service
+        namespace: workbenches-operator-system
+    webhooks:
+      - name: workbenches-connection-notebook
+        type: mutating
+        path: /workbenches-connection-notebook
+      - name: workbenches-hardware-profile
+        type: mutating
+        path: /workbenches-hardware-profile
+    steadyState:
+      timeout: "60s"
+      checks:
+        - type: conditionTrue
+          apiVersion: apps/v1
+          kind: Deployment
+          name: workbenches-operator
+          namespace: workbenches-operator-system
+          conditionType: Available
+
+  - name: odh-notebook-controller
+    controller: Workbenches
+    managedResources:
+      - apiVersion: apps/v1
+        kind: Deployment
+        name: odh-notebook-controller-manager
+        namespace: opendatahub
+        labels:
+          app: odh-notebook-controller
+          app.opendatahub.io/workbenches: "true"
+        expectedSpec:
+          replicas: 1
+    dependencies:
+      - workbenches-operator
+    steadyState:
+      timeout: "60s"
+      checks:
+        - type: conditionTrue
+          apiVersion: apps/v1
+          kind: Deployment
+          name: odh-notebook-controller-manager
+          namespace: opendatahub
+          conditionType: Available
+
+  - name: notebook-controller
+    controller: Workbenches
+    managedResources:
+      - apiVersion: apps/v1
+        kind: Deployment
+        name: notebook-controller-deployment
+        namespace: opendatahub
+        labels:
+          app.opendatahub.io/workbenches: "true"
+        expectedSpec:
+          replicas: 1
+    dependencies:
+      - workbenches-operator
+    steadyState:
+      timeout: "60s"
+      checks:
+        - type: conditionTrue
+          apiVersion: apps/v1
+          kind: Deployment
+          name: notebook-controller-deployment
+          namespace: opendatahub
+          conditionType: Available
+
+recovery:
+  reconcileTimeout: "300s"
+  maxReconcileCycles: 10
