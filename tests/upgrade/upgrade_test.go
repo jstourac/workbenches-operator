@@ -23,7 +23,9 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -38,6 +40,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -69,6 +72,11 @@ const (
 	notebookNameLabel    = "notebook-name"
 	phasePrepare         = "prepare"
 	phaseVerify          = "verify"
+
+	// Long enough to see a reconcile loop, which is a few seconds per cycle.
+	// A single managedFields sample is not enough.
+	appliedObjectStability          = 20 * time.Second
+	fieldManagerWorkbenchesOperator = "workbenches-operator"
 
 	// go test uses this package directory as its working directory, so this is
 	// tests/upgrade/artifacts/snapshot.json from the module root. That directory is gitignored.
@@ -208,6 +216,7 @@ var _ = Describe("operator upgrade", func() {
 			controllersRunning(g)
 		}, timeout, interval).Should(Succeed())
 		waitForWebhookEndpoints()
+		assertAppliedObjectsSettled()
 
 		// The new controllers are up. Hold the sample long enough for a reconcile
 		// to recreate the Notebook pod if the upgrade was going to.
@@ -703,6 +712,264 @@ func assertConnectionInjection() {
 
 		g.Expect(matched).To(BeTrue())
 	}, timeout, interval).Should(Succeed())
+}
+
+// operandStabilityGVKs are the kinds applyObjects can emit. resourceVersion is
+// the wrong signal for most of them: another controller can bump it without
+// this operator writing. The field manager timestamp moves when our apply does.
+var operandStabilityGVKs = []schema.GroupVersionKind{
+	{Group: "apps", Version: "v1", Kind: "Deployment"},
+	{Group: "", Version: "v1", Kind: "ConfigMap"},
+	{Group: "", Version: "v1", Kind: "Secret"},
+	{Group: "", Version: "v1", Kind: "Service"},
+	{Group: "", Version: "v1", Kind: "ServiceAccount"},
+	{Group: "rbac.authorization.k8s.io", Version: "v1", Kind: "Role"},
+	{Group: "rbac.authorization.k8s.io", Version: "v1", Kind: "RoleBinding"},
+	{Group: "networking.k8s.io", Version: "v1", Kind: "NetworkPolicy"},
+	{Group: "image.openshift.io", Version: "v1", Kind: "ImageStream"},
+	{Group: "monitoring.coreos.com", Version: "v1", Kind: "ServiceMonitor"},
+	{Group: "rbac.authorization.k8s.io", Version: "v1", Kind: "ClusterRole"},
+	{Group: "rbac.authorization.k8s.io", Version: "v1", Kind: "ClusterRoleBinding"},
+	{Group: "admissionregistration.k8s.io", Version: "v1", Kind: "MutatingWebhookConfiguration"},
+	{Group: "admissionregistration.k8s.io", Version: "v1", Kind: "ValidatingWebhookConfiguration"},
+	{Group: "apiextensions.k8s.io", Version: "v1", Kind: "CustomResourceDefinition"},
+	{Group: "kubeflow.org", Version: "v1beta1", Kind: "WorkspaceKind"},
+}
+
+func assertAppliedObjectsSettled() {
+	admin := []string{
+		"notebook-controller-kubeflow-notebooks-admin",
+		"odh-notebook-controller-notebooks-admin",
+	}
+	edit := []string{
+		"notebook-controller-kubeflow-notebooks-edit",
+		"odh-notebook-controller-notebooks-edit",
+	}
+
+	for _, name := range admin {
+		Eventually(func(g Gomega) {
+			role := getClusterRole(g, name)
+			_, found, err := unstructured.NestedFieldNoCopy(role.Object, "aggregationRule")
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(found).To(BeTrue(), "%s missing aggregationRule", name)
+
+			rules, rulesFound, err := unstructured.NestedSlice(role.Object, "rules")
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(rulesFound).To(BeTrue(), "%s rules not populated yet", name)
+			g.Expect(rules).NotTo(BeEmpty(), "%s rules still empty", name)
+
+			g.Expect(managedFieldsOwnRules(role.GetManagedFields(), fieldManagerWorkbenchesOperator)).To(BeFalse(),
+				"%s: workbenches-operator still owns .rules", name)
+			g.Expect(aggregationControllerOwnsRules(role.GetManagedFields())).To(BeTrue(),
+				"%s: aggregation controller does not own .rules", name)
+		}, timeout, interval).Should(Succeed())
+	}
+
+	adminRVs := clusterRoleResourceVersions(admin...)
+	editRVs := clusterRoleResourceVersions(edit...)
+	generation := getWorkbenches().Generation
+	managerTimes := operandFieldManagerTimes(Default)
+	Expect(managerTimes).NotTo(BeEmpty())
+	Expect(managerTimes).To(HaveKey(operandObjectKey("ClusterRole", "", admin[0])))
+	Expect(managerTimes).To(HaveKey(operandObjectKey("ClusterRole", "", admin[1])))
+
+	Consistently(func(g Gomega) {
+		g.Expect(workbenchesGeneration(g)).To(Equal(generation),
+			"Workbenches generation changed during the stability window")
+
+		adminChanges := clusterRoleResourceVersionDiff(g, adminRVs)
+		editChanges := clusterRoleResourceVersionDiff(g, editRVs)
+		timeChanges := fieldManagerTimeDiff(managerTimes, operandFieldManagerTimes(g))
+		changes := make([]string, 0, len(adminChanges)+len(editChanges)+len(timeChanges))
+
+		for _, line := range adminChanges {
+			changes = append(changes, "resourceVersion "+line)
+		}
+
+		for _, line := range editChanges {
+			changes = append(changes, "resourceVersion "+line)
+		}
+
+		changes = append(changes, timeChanges...)
+
+		g.Expect(changes).To(BeEmpty(),
+			"applied objects still changing after upgrade:\n%s",
+			strings.Join(changes, "\n"))
+	}, appliedObjectStability, interval).Should(Succeed())
+}
+
+func workbenchesGeneration(g Gomega) int64 {
+	wb := &componentsv1alpha1.Workbenches{}
+	g.Expect(k8sClient.Get(ctx, types.NamespacedName{
+		Name: componentsv1alpha1.WorkbenchesInstanceName,
+	}, wb)).To(Succeed())
+
+	return wb.Generation
+}
+
+func operandObjectKey(kind, namespace, name string) string {
+	return fmt.Sprintf("%s/%s/%s", kind, namespace, name)
+}
+
+func operandFieldManagerTimes(g Gomega) map[string]string {
+	times := map[string]string{}
+
+	for _, gvk := range operandStabilityGVKs {
+		list := &unstructured.UnstructuredList{}
+		list.SetGroupVersionKind(gvk)
+
+		err := k8sClient.List(ctx, list, client.MatchingLabels{
+			metadata.ComponentLabelKey: metadata.LabelTrue,
+			metadata.PartOfLabelKey:    metadata.ComponentLabelValue,
+		})
+		if meta.IsNoMatchError(err) {
+			continue
+		}
+
+		g.Expect(err).NotTo(HaveOccurred())
+
+		for i := range list.Items {
+			obj := &list.Items[i]
+			stamp, ok := workbenchesOperatorFieldManagerStamp(obj.GetManagedFields())
+			g.Expect(ok).To(BeTrue(), "%s %s/%s has no %s managedFields entry",
+				obj.GetKind(), obj.GetNamespace(), obj.GetName(), fieldManagerWorkbenchesOperator)
+			times[operandObjectKey(obj.GetKind(), obj.GetNamespace(), obj.GetName())] = stamp
+		}
+	}
+
+	return times
+}
+
+func workbenchesOperatorFieldManagerStamp(fields []metav1.ManagedFieldsEntry) (string, bool) {
+	parts := make([]string, 0, len(fields))
+
+	for _, entry := range fields {
+		if entry.Manager != fieldManagerWorkbenchesOperator || entry.Time == nil {
+			continue
+		}
+
+		parts = append(parts, string(entry.Operation)+"/"+entry.Subresource+"@"+entry.Time.UTC().Format(time.RFC3339Nano))
+	}
+
+	if len(parts) == 0 {
+		return "", false
+	}
+
+	sort.Strings(parts)
+
+	return strings.Join(parts, ","), true
+}
+
+func fieldManagerTimeDiff(before, after map[string]string) []string {
+	keys := make([]string, 0, len(before)+len(after))
+	seen := make(map[string]struct{}, len(before)+len(after))
+
+	for key := range before {
+		seen[key] = struct{}{}
+		keys = append(keys, key)
+	}
+
+	for key := range after {
+		if _, ok := seen[key]; ok {
+			continue
+		}
+
+		keys = append(keys, key)
+	}
+
+	sort.Strings(keys)
+
+	changes := make([]string, 0)
+
+	for _, key := range keys {
+		was, hadBefore := before[key]
+		now, hasAfter := after[key]
+
+		switch {
+		case !hadBefore:
+			changes = append(changes, fmt.Sprintf("managedFields %s: added %s", key, now))
+		case !hasAfter:
+			changes = append(changes, fmt.Sprintf("managedFields %s: removed (was %s)", key, was))
+		case was != now:
+			changes = append(changes, fmt.Sprintf("managedFields %s: %s -> %s", key, was, now))
+		}
+	}
+
+	return changes
+}
+
+func getClusterRole(g Gomega, name string) *unstructured.Unstructured {
+	role := &unstructured.Unstructured{}
+	role.SetGroupVersionKind(schema.GroupVersionKind{
+		Group: "rbac.authorization.k8s.io", Version: "v1", Kind: "ClusterRole",
+	})
+	g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name}, role)).To(Succeed())
+
+	return role
+}
+
+func clusterRoleResourceVersions(names ...string) map[string]string {
+	versions := make(map[string]string, len(names))
+	for _, name := range names {
+		versions[name] = getClusterRole(Default, name).GetResourceVersion()
+	}
+
+	return versions
+}
+
+func clusterRoleResourceVersionDiff(g Gomega, before map[string]string) []string {
+	names := make([]string, 0, len(before))
+	for name := range before {
+		names = append(names, name)
+	}
+
+	sort.Strings(names)
+
+	changes := make([]string, 0)
+
+	for _, name := range names {
+		now := getClusterRole(g, name).GetResourceVersion()
+		if now == before[name] {
+			continue
+		}
+
+		changes = append(changes, fmt.Sprintf("%s: %s -> %s", name, before[name], now))
+	}
+
+	return changes
+}
+
+func managedFieldsOwnRules(fields []metav1.ManagedFieldsEntry, manager string) bool {
+	for _, entry := range fields {
+		if entry.Manager != manager || entry.FieldsV1 == nil {
+			continue
+		}
+
+		var doc map[string]json.RawMessage
+		if err := json.Unmarshal(entry.FieldsV1.Raw, &doc); err != nil {
+			continue
+		}
+
+		if _, ok := doc["f:rules"]; ok {
+			return true
+		}
+	}
+
+	return false
+}
+
+func aggregationControllerOwnsRules(fields []metav1.ManagedFieldsEntry) bool {
+	for _, entry := range fields {
+		if !strings.Contains(entry.Manager, "aggregation") {
+			continue
+		}
+
+		if managedFieldsOwnRules([]metav1.ManagedFieldsEntry{entry}, entry.Manager) {
+			return true
+		}
+	}
+
+	return false
 }
 
 func writeSnapshot(snap upgradeSnapshot) {

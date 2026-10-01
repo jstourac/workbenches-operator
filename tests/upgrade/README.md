@@ -12,6 +12,7 @@ Tracked by [RHOAIENG-96953](https://redhat.atlassian.net/browse/RHOAIENG-96953).
 - The running Notebook's pod UID stays the same and its restart count does not increase.
 - The stopped Notebook stays at 0 replicas. It is stopped only after the first reconcile, because the odh controller uses `kubeflow-resource-stopped` as a lock while creating a Notebook and then clears it. The annotation must stay set and must not be the transient value `odh-notebook-controller-lock`.
 - A Notebook created after the upgrade still receives connection `envFrom` from the operator webhook.
+- After the new operator is Ready, applied objects stay still for 20s. Aggregated admin ClusterRoles keep a non-empty `.rules` list owned by `clusterrole-aggregation-controller`, not by `workbenches-operator`, and their `resourceVersion` does not move. The static edit roles are the control for cluster-wide etcd churn. Every other labeled operand is checked by `workbenches-operator`'s managed-fields timestamp, which stays put when this operator is idle and moves when it writes again. Deployment status, ImageStream import, and a one-time `caBundle` injection may still change `resourceVersion`. This is the post-upgrade end state for [RHOAIENG-96364](https://redhat.atlassian.net/browse/RHOAIENG-96364). The greenfield e2e spec covers the same end state on a fresh install.
 
 `workbenchesV2` stays `Removed`.
 
